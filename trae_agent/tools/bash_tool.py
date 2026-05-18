@@ -10,7 +10,11 @@
 # This modified file is released under the same license.
 
 import asyncio
+import json
 import os
+import re
+from datetime import datetime
+from pathlib import Path
 from typing import override
 
 from trae_agent.tools.base import Tool, ToolCallArguments, ToolError, ToolExecResult, ToolParameter
@@ -168,6 +172,7 @@ class BashTool(Tool):
     def __init__(self, model_provider: str | None = None):
         super().__init__(model_provider)
         self._session: _BashSession | None = None
+        self._command_counter = 0
 
     @override
     def get_model_provider(self) -> str | None:
@@ -232,8 +237,14 @@ class BashTool(Tool):
                 error=f"No command provided for the {self.get_name()} tool",
                 error_code=-1,
             )
+
+        safety_error = self._validate_command(command)
+        if safety_error:
+            return ToolExecResult(error=safety_error, error_code=-1)
+
         try:
-            return await self._session.run(command)
+            result = await self._session.run(command)
+            return self._record_and_truncate_result(command, result)
         except Exception as e:
             return ToolExecResult(error=f"Error running bash command: {e}", error_code=-1)
 
@@ -244,3 +255,99 @@ class BashTool(Tool):
             ret = await self._session.stop()
             self._session = None
             return ret
+
+    def _validate_command(self, command: str) -> str | None:
+        normalized = command.lower()
+        forbidden_patterns = [
+            (r"(^|[\s;&|()])docker([\s;&|()]|$)", "Docker commands are forbidden for this environment setup task."),
+            (r"(^|[\s;&|()])docker-compose([\s;&|()]|$)", "Docker Compose commands are forbidden for this environment setup task."),
+            (r"docker\s+compose", "Docker Compose commands are forbidden for this environment setup task."),
+            (r"rm\s+-[^\n;&|]*r[^\n;&|]*f\s+/", "Refusing dangerous recursive deletion from filesystem root."),
+            (r"sudo\s+rm\s+-[^\n;&|]*r[^\n;&|]*f", "Refusing sudo recursive deletion."),
+            (r"git\s+clean\s+-[^\n;&|]*f[^\n;&|]*d", "Refusing destructive git clean command."),
+        ]
+        for pattern, message in forbidden_patterns:
+            if re.search(pattern, normalized):
+                return message
+        return None
+
+    def _record_and_truncate_result(
+        self, command: str, result: ToolExecResult
+    ) -> ToolExecResult:
+        self._command_counter += 1
+        env_dir = Path.cwd() / ".trae_env"
+        logs_dir = env_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        log_path = logs_dir / f"bash_step_{self._command_counter:04d}.log"
+        log_payload = (
+            f"timestamp: {datetime.now().isoformat()}\n"
+            f"command: {command}\n"
+            f"returncode: {result.error_code}\n\n"
+            "===== STDOUT =====\n"
+            f"{result.output or ''}\n\n"
+            "===== STDERR =====\n"
+            f"{result.error or ''}\n"
+        )
+        log_path.write_text(log_payload, encoding="utf-8")
+        self._append_command_record(command, result, log_path)
+        self._record_reproduction_verification(command, result, log_path)
+
+        result.output = self._truncate_text(result.output, log_path, "stdout")
+        result.error = self._truncate_text(result.error, log_path, "stderr")
+        return result
+
+    def _append_command_record(
+        self, command: str, result: ToolExecResult, log_path: Path
+    ) -> None:
+        commands_path = Path.cwd() / ".trae_env" / "commands.json"
+        try:
+            commands = json.loads(commands_path.read_text(encoding="utf-8"))
+            if not isinstance(commands, list):
+                commands = []
+        except (FileNotFoundError, json.JSONDecodeError):
+            commands = []
+
+        commands.append(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "command": command,
+                "returncode": result.error_code,
+                "log": str(log_path),
+            }
+        )
+        commands_path.write_text(json.dumps(commands, indent=2), encoding="utf-8")
+
+    def _record_reproduction_verification(
+        self, command: str, result: ToolExecResult, log_path: Path
+    ) -> None:
+        if result.error_code != 0:
+            return
+        if "run_reproduction.sh" not in command:
+            return
+
+        verification_path = Path.cwd() / ".trae_env" / "reproduction_verification.json"
+        verification = {
+            "timestamp": datetime.now().isoformat(),
+            "command": command,
+            "returncode": result.error_code,
+            "log": str(log_path),
+        }
+        verification_path.write_text(json.dumps(verification, indent=2), encoding="utf-8")
+
+    def _truncate_text(self, text: str | None, log_path: Path, stream_name: str) -> str | None:
+        if text is None:
+            return None
+
+        max_chars = 12000
+        if len(text) <= max_chars:
+            return text
+
+        head_chars = 6000
+        tail_chars = 6000
+        return (
+            f"[{stream_name} output truncated; full log saved to {log_path}]\n"
+            f"{text[:head_chars]}\n"
+            "...[truncated]...\n"
+            f"{text[-tail_chars:]}"
+        )

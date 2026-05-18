@@ -5,6 +5,7 @@
 
 from trae_agent.agent.agent import Agent
 from trae_agent.agent.base_agent import BaseAgent
+from trae_agent.agent.env_setup_agent import EnvSetupAgent
 from trae_agent.agent.trae_agent import TraeAgent
 
-__all__ = ["BaseAgent", "TraeAgent", "Agent"]
+__all__ = ["BaseAgent", "TraeAgent", "EnvSetupAgent", "Agent"]

@@ -185,8 +185,8 @@ def cli():
 @click.option(
     "--agent-type",
     "-at",
-    type=click.Choice(["trae_agent"], case_sensitive=False),
-    help="Type of agent to use (trae_agent)",
+    type=click.Choice(["trae_agent", "env_setup_agent"], case_sensitive=False),
+    help="Type of agent to use (trae_agent or env_setup_agent)",
     default="trae_agent",
 )
 def run(
@@ -433,8 +433,8 @@ def run(
 @click.option(
     "--agent-type",
     "-at",
-    type=click.Choice(["trae_agent"], case_sensitive=False),
-    help="Type of agent to use (trae_agent)",
+    type=click.Choice(["trae_agent", "env_setup_agent"], case_sensitive=False),
+    help="Type of agent to use (trae_agent or env_setup_agent)",
     default="trae_agent",
 )
 def interactive(

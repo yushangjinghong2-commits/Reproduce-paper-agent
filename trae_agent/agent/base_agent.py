@@ -233,6 +233,21 @@ class BaseAgent(ABC):
                 return [LLMMessage(role="user", content=self.task_incomplete_message())]
         else:
             tool_calls = llm_response.tool_calls
+            if (
+                not tool_calls
+                and llm_response.content.startswith("RECOVERABLE_TOOL_CALL_PARSE_ERROR")
+            ):
+                return [LLMMessage(role="user", content=llm_response.content)]
+            if not tool_calls and llm_response.finish_reason == "length":
+                return [
+                    LLMMessage(
+                        role="user",
+                        content=(
+                            "Your previous response was truncated by the token limit. "
+                            "Retry with a shorter response or a shorter tool call."
+                        ),
+                    )
+                ]
             return await self._tool_call_handler(tool_calls, step)
 
     async def _finalize_step(

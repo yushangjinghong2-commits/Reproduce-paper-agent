@@ -148,24 +148,35 @@ class OpenAICompatibleClient(BaseLLMClient):
 
         choice = response.choices[0]
 
+        parse_error_content = ""
         tool_calls: list[ToolCall] | None = None
         if choice.message.tool_calls:
             tool_calls = []
             for tool_call in choice.message.tool_calls:
+                try:
+                    arguments = (
+                        json.loads(tool_call.function.arguments)
+                        if tool_call.function.arguments
+                        else {}
+                    )
+                except json.JSONDecodeError as e:
+                    parse_error_content = (
+                        "RECOVERABLE_TOOL_CALL_PARSE_ERROR: Tool call arguments were not valid "
+                        f"JSON, likely because the response was truncated. finish_reason={choice.finish_reason}. "
+                        f"error={e}. Please retry the same action with shorter arguments."
+                    )
+                    tool_calls = None
+                    break
                 tool_calls.append(
                     ToolCall(
                         name=tool_call.function.name,
                         call_id=tool_call.id,
-                        arguments=(
-                            json.loads(tool_call.function.arguments)
-                            if tool_call.function.arguments
-                            else {}
-                        ),
+                        arguments=arguments,
                     )
                 )
 
         llm_response = LLMResponse(
-            content=choice.message.content or "",
+            content=parse_error_content or choice.message.content or "",
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason,
             model=response.model,
@@ -180,7 +191,13 @@ class OpenAICompatibleClient(BaseLLMClient):
         )
 
         # Update message history
-        if llm_response.tool_calls:
+        if parse_error_content:
+            self.message_history.append(
+                ChatCompletionAssistantMessageParam(
+                    content=parse_error_content, role="assistant"
+                )
+            )
+        elif llm_response.tool_calls:
             self.message_history.append(
                 ChatCompletionAssistantMessageParam(
                     role="assistant",

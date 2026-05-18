@@ -1,0 +1,57 @@
+# Reproduction-agent config template.
+#
+# How to switch model backends:
+# Local vLLM, third-party API gateways, and most OpenAI-compatible services
+# all use the same provider here: `openai_compatible`.
+# In normal use, only change `base_url`, `api_key`, and `model`.
+#
+# Recommended command:
+# .\.venv\Scripts\trae-cli.exe run "Read task.md and reproduce exactly the task it describes..." `
+#   --agent-type env_setup_agent `
+#   --config-file trae_config.repro.yaml.example `
+#   --working-dir C:\path\to\repo `
+#   --trajectory-file trajectories\task_repro.json `
+#   --max-steps 160
+
+agents:
+    trae_agent:
+        enable_lakeview: false
+        model: trae_agent_model
+        max_steps: 160
+        tools:
+            - bash
+            - str_replace_based_edit_tool
+            - sequentialthinking
+            - task_done
+
+allow_mcp_servers: []
+mcp_servers: {}
+
+model_providers:
+    # Default backend. Works for local vLLM and third-party OpenAI-compatible
+    # /v1/chat/completions APIs. Normally only edit these three fields:
+    # api_key, base_url, model.
+    openai_compatible:
+        api_key: EMPTY
+        provider: openai_compatible
+        base_url: http://127.0.0.1:8000/v1
+
+models:
+    trae_agent_model:
+        model_provider: openai_compatible
+
+        # For your current vLLM server, /v1/models returned Qwen3-8B.
+        # For other APIs, set this to the exact served model name.
+        model: Qwen3-8B
+
+        # Output budget per LLM call. Total context is still limited by the
+        # served model, e.g. Qwen3-8B currently reports max_model_len=16384.
+        max_tokens: 4096
+        temperature: 0.2
+        top_p: 1
+        top_k: 0
+        max_retries: 3
+
+        # Keep false for local/smaller models unless you have verified stable
+        # parallel tool calling.
+        parallel_tool_calls: false

@@ -98,16 +98,27 @@ class OpenAIClient(BaseLLMClient):
         response = retry_decorator(api_call_input, model_config, tool_schemas)
 
         content = ""
+        parse_error_content = ""
         tool_calls: list[ToolCall] = []
         for output_block in response.output:
             if output_block.type == "function_call":
+                try:
+                    arguments = (
+                        json.loads(output_block.arguments) if output_block.arguments else {}
+                    )
+                except json.JSONDecodeError as e:
+                    parse_error_content = (
+                        "RECOVERABLE_TOOL_CALL_PARSE_ERROR: Tool call arguments were not valid "
+                        f"JSON, likely because the response was truncated. finish_reason={response.status}. "
+                        f"error={e}. Please retry the same action with shorter arguments."
+                    )
+                    tool_calls = []
+                    break
                 tool_calls.append(
                     ToolCall(
                         call_id=output_block.call_id,
                         name=output_block.name,
-                        arguments=json.loads(output_block.arguments)
-                        if output_block.arguments
-                        else {},
+                        arguments=arguments,
                         id=output_block.id,
                     )
                 )
@@ -128,6 +139,9 @@ class OpenAIClient(BaseLLMClient):
                     for content_block in output_block.content
                     if content_block.type == "output_text"
                 )
+
+        if parse_error_content:
+            content = parse_error_content
 
         if content != "":
             self.message_history.append(

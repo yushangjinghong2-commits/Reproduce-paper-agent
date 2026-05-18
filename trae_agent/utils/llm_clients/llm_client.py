@@ -22,6 +22,8 @@ class LLMProvider(Enum):
     OPENROUTER = "openrouter"
     DOUBAO = "doubao"
     GOOGLE = "google"
+    OPENAI_COMPATIBLE = "openai_compatible"
+    VLLM = "vllm"
 
 
 class LLMClient:
@@ -60,6 +62,14 @@ class LLMClient:
                 from .google_client import GoogleClient
 
                 self.client = GoogleClient(model_config)
+            case LLMProvider.VLLM:
+                from .vllm_client import VLLMClient
+
+                self.client = VLLMClient(model_config)
+            case LLMProvider.OPENAI_COMPATIBLE:
+                from .vllm_client import VLLMClient
+
+                self.client = VLLMClient(model_config)
 
     def set_trajectory_recorder(self, recorder: TrajectoryRecorder | None) -> None:
         """Set the trajectory recorder for the underlying client."""
