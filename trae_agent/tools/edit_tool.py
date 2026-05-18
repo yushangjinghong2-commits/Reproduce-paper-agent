@@ -159,10 +159,12 @@ Notes for using the `str_replace` command:
                     "The `view_range` parameter is not allowed when `path` points to a directory."
                 )
 
-            return_code, stdout, stderr = await run(rf"find {path} -maxdepth 2 -not -path '*/\.*'")
-            if not stderr:
-                stdout = f"Here's the files and directories up to 2 levels deep in {path}, excluding hidden items:\n{stdout}\n"
-            return ToolExecResult(error_code=return_code, output=stdout, error=stderr)
+            entries = self._list_directory(path)
+            stdout = (
+                f"Here's the files and directories up to 2 levels deep in {path}, excluding hidden items:\n"
+                f"{entries}\n"
+            )
+            return ToolExecResult(error_code=0, output=stdout)
 
         file_content = self.read_file(path)
         init_line = 1
@@ -278,9 +280,12 @@ Notes for using the `str_replace` command:
     def read_file(self, path: Path):
         """Read the content of a file from a given path; raise a ToolError if an error occurs."""
         try:
-            return path.read_text()
+            return path.read_text(encoding="utf-8")
         except Exception as e:
-            raise ToolError(f"Ran into {e} while trying to read {path}") from None
+            try:
+                return path.read_text(encoding="gb18030")
+            except Exception:
+                raise ToolError(f"Ran into {e} while trying to read {path}") from None
 
     def write_file(self, path: Path, file: str):
         """Write the content of a file to a given path; raise a ToolError if an error occurs."""
@@ -288,6 +293,20 @@ Notes for using the `str_replace` command:
             _ = path.write_text(file)
         except Exception as e:
             raise ToolError(f"Ran into {e} while trying to write to {path}") from None
+
+    def _list_directory(self, path: Path) -> str:
+        entries: list[str] = []
+        try:
+            for child in sorted(path.rglob("*")):
+                if any(part.startswith(".") for part in child.relative_to(path).parts):
+                    continue
+                depth = len(child.relative_to(path).parts)
+                if depth > 2:
+                    continue
+                entries.append(str(child))
+        except OSError:
+            return ""
+        return maybe_truncate("\n".join(entries))
 
     def _make_output(
         self,

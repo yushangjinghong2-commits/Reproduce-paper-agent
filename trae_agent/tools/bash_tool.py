@@ -11,6 +11,7 @@
 
 import asyncio
 import json
+import locale
 import os
 import re
 from datetime import datetime
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import override
 
 from trae_agent.tools.base import Tool, ToolCallArguments, ToolError, ToolExecResult, ToolParameter
+from trae_agent.tools.run import decode_bytes
 
 
 class _BashSession:
@@ -115,12 +117,16 @@ class _BashSession:
         errcode_retriever = "!errorlevel!" if os.name == "nt" else "$?"
         command_sep = "&" if os.name == "nt" else ";"
 
+        if os.name != "nt":
+            command = "set -o pipefail\n" + command
+
         # send command to the process
-        self._process.stdin.write(
-            b"(\n"
-            + command.encode()
-            + f"\n){command_sep} echo {self._sentinel.replace('__ERROR_CODE__', errcode_retriever)}\n".encode()
+        command_block = (
+            "(\n"
+            + command
+            + f"\n){command_sep} echo {self._sentinel.replace('__ERROR_CODE__', errcode_retriever)}\n"
         )
+        self._process.stdin.write(self._encode_command(command_block))
         await self._process.stdin.drain()
 
         # read output from the process, until the sentinel is found
@@ -130,7 +136,7 @@ class _BashSession:
                     await asyncio.sleep(self._output_delay)
                     # if we read directly from stdout/stderr, it will wait forever for
                     # EOF. use the StreamReader buffer directly instead.
-                    output: str = self._process.stdout._buffer.decode()  # type: ignore[attr-defined] # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+                    output: str = decode_bytes(self._process.stdout._buffer)  # type: ignore[attr-defined] # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
                     if sentinel_before in output:
                         # strip the sentinel from output
                         output, pivot, exit_banner = output.rpartition(sentinel_before)
@@ -152,7 +158,7 @@ class _BashSession:
         if output.endswith("\n"):  # pyright: ignore[reportUnknownMemberType]
             output = output[:-1]  # pyright: ignore[reportUnknownVariableType]
 
-        error: str = self._process.stderr._buffer.decode()  # type: ignore[attr-defined] # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportAttributeAccessIssue]
+        error: str = decode_bytes(self._process.stderr._buffer)  # type: ignore[attr-defined] # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportAttributeAccessIssue]
         if error.endswith("\n"):  # pyright: ignore[reportUnknownMemberType]
             error = error[:-1]  # pyright: ignore[reportUnknownVariableType]
 
@@ -161,6 +167,11 @@ class _BashSession:
         self._process.stderr._buffer.clear()  # type: ignore[attr-defined] # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
 
         return ToolExecResult(output=output, error=error, error_code=error_code)  # pyright: ignore[reportUnknownArgumentType]
+
+    def _encode_command(self, command: str) -> bytes:
+        if os.name == "nt":
+            return command.encode(locale.getpreferredencoding(False), errors="replace")
+        return command.encode()
 
 
 class BashTool(Tool):
@@ -323,7 +334,7 @@ class BashTool(Tool):
     ) -> None:
         if result.error_code != 0:
             return
-        if "run_reproduction.sh" not in command:
+        if not self._is_reproduction_command(command):
             return
 
         verification_path = Path.cwd() / ".trae_env" / "reproduction_verification.json"
@@ -334,6 +345,14 @@ class BashTool(Tool):
             "log": str(log_path),
         }
         verification_path.write_text(json.dumps(verification, indent=2), encoding="utf-8")
+
+    def _is_reproduction_command(self, command: str) -> bool:
+        segment_prefix = r"(?:^|[;&]\s*|\|\|\s*|&&\s*)"
+        optional_runner = r"(?:(?:bash|sh)\s+)?"
+        script = r"(?:\./)?run_reproduction\.sh"
+        terminator = r"(?:\s|$)"
+        pattern = segment_prefix + optional_runner + script + terminator
+        return re.search(pattern, command) is not None
 
     def _truncate_text(self, text: str | None, log_path: Path, stream_name: str) -> str | None:
         if text is None:

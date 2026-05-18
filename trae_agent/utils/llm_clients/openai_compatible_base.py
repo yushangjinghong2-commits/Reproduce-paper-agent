@@ -91,19 +91,34 @@ class OpenAICompatibleClient(BaseLLMClient):
         else:
             token_params["max_tokens"] = model_config.get_max_tokens_param()
 
-        return self.client.chat.completions.create(
-            model=model_config.model,
-            messages=self.message_history,
-            tools=tool_schemas if tool_schemas else openai.NOT_GIVEN,
-            temperature=model_config.temperature
+        request_params = {
+            "model": model_config.model,
+            "messages": self.message_history,
+            "tools": tool_schemas if tool_schemas else openai.NOT_GIVEN,
+            "temperature": model_config.temperature
             if "o3" not in model_config.model
             and "o4-mini" not in model_config.model
             and "gpt-5" not in model_config.model
             else openai.NOT_GIVEN,
-            top_p=model_config.top_p,
-            extra_headers=extra_headers if extra_headers else None,
-            n=1,
+            "top_p": model_config.top_p,
+            "extra_headers": extra_headers if extra_headers else None,
+            "n": 1,
             **token_params,
+        }
+
+        if self._should_disable_thinking(model_config):
+            request_params["extra_body"] = {"thinking": {"type": "disabled"}}
+
+        return self.client.chat.completions.create(**request_params)
+
+    def _should_disable_thinking(self, model_config: ModelConfig) -> bool:
+        provider_name = self.provider_config.get_provider_name().lower()
+        base_url = (model_config.model_provider.base_url or "").lower()
+        model_name = model_config.model.lower()
+        return (
+            "deepseek" in provider_name
+            or "deepseek" in base_url
+            or model_name.startswith("deepseek-v4")
         )
 
     @override

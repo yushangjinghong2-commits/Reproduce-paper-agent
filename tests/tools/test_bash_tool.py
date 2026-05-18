@@ -1,7 +1,10 @@
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
+import os
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from trae_agent.tools.base import ToolCallArguments
 from trae_agent.tools.bash_tool import BashTool
@@ -62,6 +65,40 @@ class TestBashTool(unittest.IsolatedAsyncioTestCase):
         result = await self.tool.execute(ToolCallArguments({}))
         self.assertIn("no command provided", result.error.lower())
         self.assertEqual(result.error_code, -1)
+
+    @unittest.skipIf(os.name == "nt", "pipefail behavior is specific to bash on Linux/WSL")
+    async def test_pipeline_failure_is_not_hidden_by_tee(self):
+        result = await self.tool.execute(
+            ToolCallArguments({"command": "false | tee /tmp/trae-agent-pipefail-test.log"})
+        )
+
+        self.assertNotEqual(result.error_code, 0)
+
+    @unittest.skipIf(os.name == "nt", "verification command matching is exercised through bash")
+    async def test_reproduction_verification_requires_script_execution(self):
+        with TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            script = workdir / "run_reproduction.sh"
+            script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            script.chmod(0o755)
+
+            cleanup_result = await self.tool.execute(
+                ToolCallArguments(
+                    {"command": f"cd {workdir.as_posix()} && rm -f run_reproduction.sh"}
+                )
+            )
+            self.assertEqual(cleanup_result.error_code, 0)
+            self.assertFalse((workdir / ".trae_env" / "reproduction_verification.json").exists())
+
+            script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            script.chmod(0o755)
+            run_result = await self.tool.execute(
+                ToolCallArguments(
+                    {"command": f"cd {workdir.as_posix()} && bash run_reproduction.sh"}
+                )
+            )
+            self.assertEqual(run_result.error_code, 0)
+            self.assertTrue((workdir / ".trae_env" / "reproduction_verification.json").exists())
 
 
 if __name__ == "__main__":

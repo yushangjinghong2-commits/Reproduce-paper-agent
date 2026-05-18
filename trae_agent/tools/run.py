@@ -13,9 +13,25 @@
 
 import asyncio
 import contextlib
+import locale
 
 TRUNCATED_MESSAGE: str = "<response clipped><NOTE>To save on context only part of this file has been shown to you. You should retry this tool after you have searched inside the file with `grep -n` in order to find the line numbers of what you are looking for.</NOTE>"
 MAX_RESPONSE_LEN: int = 16000
+
+
+def decode_bytes(data: bytes) -> str:
+    """Decode process output robustly across UTF-8 Linux and GBK Windows shells."""
+    encodings = ["utf-8", locale.getpreferredencoding(False), "gb18030", "gbk"]
+    seen: set[str] = set()
+    for encoding in encodings:
+        if not encoding or encoding.lower() in seen:
+            continue
+        seen.add(encoding.lower())
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
 
 
 def maybe_truncate(content: str, truncate_after: int | None = MAX_RESPONSE_LEN):
@@ -41,8 +57,8 @@ async def run(
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
         return (
             process.returncode or 0,
-            maybe_truncate(stdout.decode(), truncate_after=truncate_after),
-            maybe_truncate(stderr.decode(), truncate_after=truncate_after),
+            maybe_truncate(decode_bytes(stdout), truncate_after=truncate_after),
+            maybe_truncate(decode_bytes(stderr), truncate_after=truncate_after),
         )
     except asyncio.TimeoutError as exc:
         with contextlib.suppress(ProcessLookupError):

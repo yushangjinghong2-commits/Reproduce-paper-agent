@@ -1,10 +1,10 @@
 # Trae Reproduction Agent 使用说明
 
-本仓库是在 Trae Agent 基础上改造的任务复现 agent。目标不是完整复现整篇论文，而是：给定一个仓库和一个 markdown 任务说明，让 agent 完成从环境配置、数据集下载、checkpoint/模型下载、命令执行、结果记录，到和 README/markdown 原始指标对比的闭环。
+本仓库是在 Trae Agent 基础上改造的任务复现 agent。目标不是完整复现整篇论文，而是：给定一个仓库和一个你指定的复现目标提示词，让 agent 只阅读 `README.md`，从 README 中总结环境配置、数据集下载、checkpoint/模型下载、推理/评测命令、原始结果，然后复现这个目标并输出对比表。
 
 ## 1. 前置条件
 
-推荐在 Linux 服务器上运行。
+推荐在 Linux 或 WSL 上运行。后续说明默认使用 Linux/WSL 的 `bash` 命令。
 
 需要准备：
 
@@ -12,7 +12,8 @@
 - 已安装本仓库依赖
 - 一个可访问的模型服务
 - 一个目标代码仓库
-- 目标仓库中有任务说明 markdown，例如 `task.md`
+- 目标仓库中有 `README.md`
+- 你明确指定一个复现目标提示词，例如 `"复现 README 表 1 中 MuQ-MuLan 在 SongEval 上的 SRCC"` 或 `"跑 README 中的 zero-shot evaluation 命令并对比主结果"`
 
 安装依赖：
 
@@ -21,10 +22,17 @@ cd /path/to/trae-agent
 uv sync --all-extras
 ```
 
-如果已经有 `.venv`，脚本会优先使用：
+脚本会优先使用当前激活的虚拟环境：
+
+```bash
+$VIRTUAL_ENV/bin/trae-cli
+```
+
+如果没有激活环境，再依次尝试：
 
 ```bash
 .venv/bin/trae-cli
+venv/bin/trae-cli
 ```
 
 否则会回退到：
@@ -83,7 +91,7 @@ curl http://127.0.0.1:8000/v1/models
 启动时：
 
 ```bash
-./scripts/run_repro.sh --working-dir /path/to/target-repo
+./scripts/run_repro.sh --working-dir ../target-repo --target "复现目标提示词"
 ```
 
 因为默认值已经是：
@@ -101,7 +109,8 @@ PROVIDER=openai_compatible
 
 ```bash
 ./scripts/run_repro.sh \
-  --working-dir /path/to/target-repo \
+  --working-dir ../target-repo \
+  --target "复现目标提示词" \
   --base-url https://your-api-host/v1 \
   --api-key your_api_key \
   --model your-model-name
@@ -113,7 +122,7 @@ PROVIDER=openai_compatible
 BASE_URL=https://your-api-host/v1 \
 API_KEY=your_api_key \
 MODEL=your-model-name \
-./scripts/run_repro.sh --working-dir /path/to/target-repo
+./scripts/run_repro.sh --working-dir ../target-repo --target "复现目标提示词"
 ```
 
 ### 2.3 什么时候才改 provider
@@ -133,8 +142,8 @@ MODEL=your-model-name \
 准备目标仓库：
 
 ```bash
-cd /path/to/target-repo
-ls task.md
+cd ../target-repo
+ls README.md
 ```
 
 启动 agent：
@@ -142,18 +151,21 @@ ls task.md
 ```bash
 cd /path/to/trae-agent
 chmod +x scripts/run_repro.sh
-./scripts/run_repro.sh --working-dir /path/to/target-repo
+./scripts/run_repro.sh --working-dir ../target-repo --target "复现目标提示词"
 ```
 
-这个命令默认会让 agent 在目标仓库里读取 `task.md`，并执行任务复现流程。
+这个命令默认会让 agent 在目标仓库里只读取 `README.md`。读完后执行顺序是：先规划环境配置命令；再判断为了完成你的 `--target` 应该跑 README 里的哪条推理/评测命令；最后根据这条命令需要的输入，下载对应数据集、checkpoint、模型或样例输入。`--working-dir` 可以写相对路径；脚本会在内部解析成绝对路径传给 Trae CLI，但 agent 在目标仓库中生成的 `setup.sh`、`download_assets.sh`、`run_reproduction.sh` 会优先使用仓库相对路径。
 
-如果目标 markdown 不叫 `task.md`，自定义任务提示：
+如果你想补充额外要求，可以自定义任务提示，但默认约束仍然是只用 README 规划，并且只复现 `--target` 指定的目标：
 
 ```bash
 ./scripts/run_repro.sh \
-  --working-dir /path/to/target-repo \
-  --task "Read reproduce_gui_kv.md and reproduce exactly the task it describes. Do not use Docker."
+  --working-dir ../target-repo \
+  --target "复现目标提示词" \
+  --task "Read only README.md and reproduce the specified target. Do not use Docker."
 ```
+
+如果 `README.md` 不存在或无法读取，agent 应写 `failure_analysis.md` 说明缺失文件和证据。
 
 ## 4. 参数优先级
 
@@ -176,15 +188,15 @@ chmod +x scripts/run_repro.sh
 也可以不使用脚本，直接运行：
 
 ```bash
-.venv/bin/trae-cli run "Read task.md and reproduce exactly the task it describes. Configure the environment, download required datasets and checkpoints, run the specified commands, extract reproduced metrics, extract original metrics from README or the markdown, and write results_comparison.md. Do not use Docker." \
+.venv/bin/trae-cli run "Read only README.md and reproduce target prompt: 复现目标提示词. Configure the environment, download required datasets and checkpoints, run the README-documented inference/evaluation command, extract reproduced result, extract original result from README when present, and write results_comparison.md. Do not use Docker." \
   --agent-type env_setup_agent \
   --config-file trae_config.repro.yaml.example \
   --provider openai_compatible \
   --model Qwen3-8B \
   --model-base-url http://127.0.0.1:8000/v1 \
   --api-key EMPTY \
-  --working-dir /path/to/target-repo \
-  --trajectory-file trajectories/task_repro.json \
+  --working-dir ../target-repo \
+  --trajectory-file trajectories/target-repo_$(date +%Y%m%d_%H%M%S).json \
   --max-steps 160
 ```
 
@@ -192,18 +204,20 @@ chmod +x scripts/run_repro.sh
 
 `env_setup_agent` 当前执行的是“md 指定任务复现”流程：
 
-1. 读取任务 markdown。
-2. 阅读目标仓库 README、docs、requirements、pyproject、setup.py、scripts 等。
-3. 从 README/markdown 中提取原始指标。
-4. 生成 `repro_plan.md`。
-5. 生成 `setup.sh`。
-6. 生成 `download_assets.sh`，用于下载数据集、checkpoint、模型或样例输入。
-7. 生成 `run_reproduction.sh`，用于执行任务指定命令。
-8. 执行 setup、下载、复现命令。
-9. 提取复现指标到 `.trae_env/reproduced_metrics.json`。
-10. 提取原始指标到 `.trae_env/original_metrics.json`。
-11. 生成 `results_comparison.md`，对比原始值、复现值、绝对差、相对差和波动分析。
-12. 生成 `final_report.md`。
+1. 读取目标仓库 `README.md`，不读取其他仓库文件来规划任务。
+2. 根据 README 先总结环境配置命令。
+3. 根据 README 判断完成 `--target` 需要跑哪条推理/评测命令。
+4. 根据这条命令反推需要哪些数据集、checkpoint、模型或样例输入。
+5. 从 README 中提取这个目标对应的原始结果或参考值。
+6. 生成 `repro_plan.md`，其中顺序为环境命令、目标运行命令、该命令所需资产、成功标准。
+7. 生成 `setup.sh`。
+8. 生成 `run_reproduction.sh`，用于执行目标命令。
+9. 生成 `download_assets.sh`，只下载目标命令需要的数据集、checkpoint、模型或样例输入。
+10. 依次执行 setup、下载、复现命令。
+11. 提取复现结果到 `.trae_env/reproduced_metrics.json`。
+12. 提取原始结果到 `.trae_env/original_metrics.json`。
+13. 生成 `results_comparison.md`，只对比这个目标的原始结果、复现结果、数值差异和波动分析。
+14. 生成 `final_report.md`。
 
 ## 7. 输出产物
 
@@ -229,14 +243,15 @@ failure_analysis.md
 `trajectory` 默认保存在 Trae Agent 仓库下：
 
 ```text
-trajectories/task_repro.json
+trajectories/<repo>_<YYYYmmdd_HHMMSS>.json
 ```
 
 可以通过参数修改：
 
 ```bash
 ./scripts/run_repro.sh \
-  --working-dir /path/to/target-repo \
+  --working-dir ../target-repo \
+  --target "复现目标提示词" \
   --trajectory-file trajectories/my_task.json
 ```
 
@@ -298,18 +313,18 @@ failure_analysis.md
 环境问题的修复优先级：
 
 1. 先看日志和 `pip freeze`/`pip show`/`pipdeptree`，判断包是缺失、太新、太旧，还是版本冲突。
-2. 再看 README、requirements、pyproject、setup.py、lock 文件和 release 时间，推断兼容版本。
+2. 再看 README 中的安装命令、版本说明和当前 `pip freeze`/`python --version`/`torch`/`cuda` 信息，推断兼容版本。
 3. 优先修改 `setup.sh` 或环境文件，固定 Python、PyTorch/CUDA、pip 包、系统包版本。
 4. 再检查数据集和 checkpoint 路径是否正确。
 5. 不要一报错就修改仓库源码。只有确认是源码和文档运行时不兼容，且环境修复不可行时，才做最小源码修改，并在 `final_report.md` 里说明。
 
 数据集和 checkpoint 规则：
 
-- 数据集必须从 README/markdown/官方文档给出的地址下载，或从用户提供的本地路径复制。
-- checkpoint / pretrained model 必须从文档来源下载，或从用户提供的本地路径复制。
+- 数据集必须从 README 给出的地址下载，或从用户提供的本地路径复制。
+- checkpoint / pretrained model 必须从 README 来源下载，或从用户提供的本地路径复制。
 - 不允许通过训练模型来代替 checkpoint 下载。
 - 如果链接失效、权限不足或文件缺失，应在 `failure_analysis.md` 中记录 URL、错误信息、需要的文件名和期望路径。
-- 除非 markdown 明确要求训练，否则训练出来的新权重不算有效复现 checkpoint。
+- 除非 README 明确要求训练，否则训练出来的新权重不算有效复现 checkpoint。
 
 ## 9. 完成条件
 

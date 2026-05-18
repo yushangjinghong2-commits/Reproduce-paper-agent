@@ -1,7 +1,7 @@
 # Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
 # SPDX-License-Identifier: MIT
 
-"""Task reproduction agent for Python research repositories."""
+"""README-driven task reproduction agent for Python research repositories."""
 
 import json
 from pathlib import Path
@@ -14,7 +14,7 @@ from trae_agent.utils.llm_clients.llm_basics import LLMMessage, LLMResponse
 
 
 class EnvSetupAgent(TraeAgent):
-    """Trae agent variant for markdown-driven reproduction tasks."""
+    """Trae agent variant for README-driven reproduction tasks."""
 
     @override
     def get_system_prompt(self) -> str:
@@ -53,7 +53,10 @@ class EnvSetupAgent(TraeAgent):
             "- final_report.md\n\n"
             "[Completion rule]:\n"
             "Call task_done only after bash run_reproduction.sh succeeds and results_comparison.md compares "
-            "the reproduced metrics with the original README/markdown metrics. Do not use Docker.\n"
+            "the reproduced target result with the original README result/value when present. Use Linux/WSL bash commands "
+            "and write generated scripts with repository-relative paths. Read only README.md for planning, "
+            "first plan environment setup commands, then identify the README command that completes the target, "
+            "then derive dataset/model/checkpoint downloads required by that command. Do not expand to unrelated README results. Do not use Docker.\n"
         )
         self._initial_messages = [
             LLMMessage(role="system", content=self.get_system_prompt()),
@@ -85,7 +88,7 @@ class EnvSetupAgent(TraeAgent):
     def task_incomplete_message(self) -> str:
         return (
             "ERROR! The requested reproduction task has not been recorded as successful. "
-            "Run `bash run_reproduction.sh` from the project root, extract reproduced metrics, "
-            "write results_comparison.md comparing them with the original README/markdown numbers, "
+            "Run `bash run_reproduction.sh` from the project root, extract the reproduced target result, "
+            "write results_comparison.md comparing it with the original README result/value when present, "
             "and only then call task_done. If the task is blocked, write failure_analysis.md with exact evidence instead of task_done."
         )

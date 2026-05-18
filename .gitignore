@@ -180,6 +180,9 @@ trae_config.yaml
 # Trajectories
 /trajectories/
 
+# Runtime artifacts from reproduction runs
+/.trae_env/
+
 # VS Code settings
 .vscode/
 !.vscode/launch.template.json
