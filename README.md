@@ -329,10 +329,10 @@ failure_analysis.md
 7. `pip install` 使用默认镜像源，不额外加 `-i`、`--index-url`、`--extra-index-url`，除非 README 明确要求。
 8. 安装 `flash-attn` 时必须加 `--no-build-isolation`。
 9. 下载 Hugging Face 数据集或模型前使用 `export HF_ENDPOINT=https://hf-mirror.com`；这个镜像只用于 Hugging Face，不用于 pip。
-10. README 没写 PyTorch 版本时，优先尝试 `torch==2.6.*`、`torchvision==0.21.*`、`torchaudio==2.6.*`，CUDA 环境优先按 CUDA 12.4 wheel 配置。
+10. torch 版本以 README 或 README 指向的 requirements 文件为准，但必须限制为 `<2.6`。README/requirements 没写 torch 版本时，优先使用默认 pip 源安装小于 2.6 的 torch：`pip install "torch<2.6" torchvision torchaudio`。不要为 torch 安装额外指定 `-i`、`--index-url`、`--extra-index-url` 或 CUDA wheel index URL。
 11. README 没写 Transformers 版本时，优先尝试 `transformers==4.55.*`。
 12. import 失败通常优先怀疑环境太新；先尝试旧一点的依赖版本。
-13. 包太新就降级，包太旧就升级，CUDA/torch 不匹配就换匹配的 PyTorch/CUDA 组合。
+13. 包太新就降级，包太旧就升级，CUDA/torch 不匹配时优先尝试默认 pip 源可安装的较旧 torch 版本，不要额外指定 torch index URL。
 14. 每次修复都记录到 `.trae_env/repair_history.md`，并重新执行失败阶段；不能第一次失败就写 `failure_analysis.md`。
 15. 再检查数据集和 checkpoint 路径是否正确。
 16. 不要一报错就修改仓库源码。只有确认是源码和文档运行时不兼容，且环境修复不可行时，才做最小源码修改，并在 `final_report.md` 里说明。

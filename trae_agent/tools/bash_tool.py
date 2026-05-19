@@ -353,6 +353,9 @@ class BashTool(Tool):
         pip_index_error = self._validate_pip_default_index(command)
         if pip_index_error:
             return pip_index_error
+        torch_version_error = self._validate_torch_version_constraint(command)
+        if torch_version_error:
+            return torch_version_error
         environment_error = self._validate_reproduction_environment_usage(command)
         if environment_error:
             return environment_error
@@ -402,7 +405,8 @@ class BashTool(Tool):
         ):
             return (
                 "pip install must use the default package index for this task. "
-                "Remove -i/--index-url/--extra-index-url unless README explicitly requires it."
+                "Remove -i/--index-url/--extra-index-url unless README explicitly requires it. "
+                "For torch installs, use the default pip index, e.g. `pip install \"torch<2.6\" torchvision torchaudio`."
             )
         for script_name in ("setup.sh", "download_assets.sh", "run_reproduction.sh"):
             if not self._command_runs_script(command, script_name):
@@ -417,8 +421,50 @@ class BashTool(Tool):
             ):
                 return (
                     f"{script_name} contains pip mirror/index options. "
-                    "Use the default pip package index; remove -i/--index-url/--extra-index-url unless README explicitly requires it."
+                    "Use the default pip package index; remove -i/--index-url/--extra-index-url unless README explicitly requires it. "
+                    "For torch installs, use the default pip index, e.g. `pip install \"torch<2.6\" torchvision torchaudio`."
                 )
+        return None
+
+    def _validate_torch_version_constraint(self, command: str) -> str | None:
+        offending_line = self._find_torch_install_without_lt26(command)
+        if offending_line:
+            return (
+                "torch installs must enforce torch<2.6 and use the default pip index. "
+                "Use README/requirements torch constraints when present, but add/keep an upper bound below 2.6. "
+                f"First offending command: {offending_line}"
+            )
+        for script_name in ("setup.sh", "download_assets.sh", "run_reproduction.sh"):
+            if not self._command_runs_script(command, script_name):
+                continue
+            script_path = Path.cwd() / script_name
+            try:
+                script_text = script_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            offending_line = self._find_torch_install_without_lt26(script_text)
+            if offending_line:
+                return (
+                    f"{script_name} contains a torch install without enforcing torch<2.6. "
+                    "Use README/requirements torch constraints when present, but add/keep an upper bound below 2.6. "
+                    f"First offending line: {offending_line}"
+                )
+        return None
+
+    def _find_torch_install_without_lt26(self, text: str) -> str | None:
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if not re.search(r"\bpip(?:\d+(?:\.\d+)?)?\s+install\b", line):
+                continue
+            if not re.search(r"(?:^|\s)[\"']?torch(?:\[.*?\])?(?:[<=>!~]=?[^\"'\s]+)?[\"']?", line):
+                continue
+            if re.search(r"[\"']?torch(?:\[.*?\])?\s*<\s*2\.6[\"']?", line):
+                continue
+            if re.search(r"[\"']?torch(?:\[.*?\])?\s*==\s*(?:[01](?:\.\d+)*|2\.[0-5](?:\.\d+)*)", line):
+                continue
+            return raw_line.strip()
         return None
 
     def _validate_reproduction_environment_usage(self, command: str) -> str | None:

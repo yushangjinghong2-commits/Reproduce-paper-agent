@@ -60,8 +60,10 @@ class EnvSetupAgent(TraeAgent):
             "the README Python version, or python=3.12 if README gives no version. Always create a dedicated conda "
             "environment for the target repository and run README setup/reproduction commands inside it; do not reuse the "
             "currently active environment. Use default pip index settings and do not add pip mirror options. If README "
-            "omits versions, prefer PyTorch 2.6 with CUDA 12.4 and transformers 4.55.x, then adjust versions based on "
-            "concrete errors. For Hugging Face datasets/models, use HF_ENDPOINT=https://hf-mirror.com. Install flash-attn "
+            "omits versions, prefer `pip install \"torch<2.6\" torchvision torchaudio` from the default pip index and "
+            "transformers 4.55.x, then adjust versions based on concrete errors. If README or README-referenced requirements "
+            "specifies torch, follow it but enforce torch<2.6. Never add torch index-url or extra-index-url. "
+            "For Hugging Face datasets/models, use HF_ENDPOINT=https://hf-mirror.com. Install flash-attn "
             "with --no-build-isolation. "
             "Do not expand to unrelated README results. Do not use Docker.\n"
         )
