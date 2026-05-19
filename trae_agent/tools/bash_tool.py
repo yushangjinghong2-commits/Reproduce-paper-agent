@@ -422,6 +422,13 @@ class BashTool(Tool):
         return None
 
     def _validate_reproduction_environment_usage(self, command: str) -> str | None:
+        direct_unscoped = self._find_unscoped_environment_commands(command)
+        if direct_unscoped and not self._is_setup_command(command):
+            return (
+                "Commands that use python/pip/torchrun/accelerate must run inside the dedicated conda environment. "
+                "Use `conda run -n <env> ...` instead of executing them directly. "
+                f"First offending command: {direct_unscoped}"
+            )
         if self._is_setup_command(command):
             setup_path = Path.cwd() / "setup.sh"
             try:
@@ -441,6 +448,13 @@ class BashTool(Tool):
                     "setup.sh installs packages without clearly running inside the dedicated conda environment. "
                     "Use `conda run -n <env> pip install ...` or activate the environment inside the script."
                 )
+            unscoped = self._find_unscoped_environment_commands(setup_text)
+            if unscoped:
+                return (
+                    "setup.sh contains commands that are not scoped to the dedicated conda environment. "
+                    "Prefer `conda run -n <env> ...` for every pip/python/torchrun/accelerate command. "
+                    f"First offending line: {unscoped}"
+                )
         if self._is_download_assets_command(command) or self._is_reproduction_command(command):
             script_name = "download_assets.sh" if self._is_download_assets_command(command) else "run_reproduction.sh"
             script_path = Path.cwd() / script_name
@@ -456,6 +470,44 @@ class BashTool(Tool):
                     f"{script_name} uses python/pip without clearly running inside the dedicated conda environment. "
                     "Use `conda run -n <env> ...` or activate the environment inside the script."
                 )
+            unscoped = self._find_unscoped_environment_commands(script_text)
+            if unscoped:
+                return (
+                    f"{script_name} contains commands that are not scoped to the dedicated conda environment. "
+                    "Prefer `conda run -n <env> ...` for every python/pip/torchrun/accelerate command. "
+                    f"First offending line: {unscoped}"
+                )
+        return None
+
+    def _find_unscoped_environment_commands(self, script_text: str) -> str | None:
+        env_commands = (
+            r"python(?:\d+(?:\.\d+)?)?",
+            r"pip(?:\d+(?:\.\d+)?)?",
+            r"torchrun",
+            r"accelerate",
+            r"pytest",
+            r"jupyter",
+        )
+        command_pattern = r"\b(?:" + "|".join(env_commands) + r")\b"
+        allowed_patterns = [
+            r"\bconda\s+run\s+-n\b",
+            r"\bconda\s+create\b",
+            r"\bconda\s+install\b",
+            r"\bconda\s+env\s+create\b",
+            r"\bmamba\s+run\s+-n\b",
+            r"\bmicromamba\s+run\s+-n\b",
+        ]
+        for raw_line in script_text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if not re.search(command_pattern, line):
+                continue
+            if any(re.search(pattern, line) for pattern in allowed_patterns):
+                continue
+            if re.search(r"\bpython\s*=", line):
+                continue
+            return raw_line.strip()
         return None
 
     def _is_download_assets_command(self, command: str) -> bool:

@@ -324,17 +324,18 @@ failure_analysis.md
 2. 再看 README 中的安装命令、版本说明和当前 `pip freeze`/`python --version`/`torch`/`cuda` 信息，推断兼容版本。
 3. 必须先为目标仓库创建专用 conda 环境，不能直接复用当前 shell 环境、base 环境或 Trae 自己的环境。
 4. 创建 conda 环境时必须指定 Python 版本；README 写明版本就使用 README 版本，没写时默认 `python=3.12`。
-5. README 的环境配置步骤必须在这个专用 conda 环境里执行，优先用 `conda run -n <env> ...` 或在脚本里显式 `conda activate <env>`。
-6. `pip install` 使用默认镜像源，不额外加 `-i`、`--index-url`、`--extra-index-url`，除非 README 明确要求。
-7. 安装 `flash-attn` 时必须加 `--no-build-isolation`。
-8. 下载 Hugging Face 数据集或模型前使用 `export HF_ENDPOINT=https://hf-mirror.com`；这个镜像只用于 Hugging Face，不用于 pip。
-9. README 没写 PyTorch 版本时，优先尝试 `torch==2.6.*`、`torchvision==0.21.*`、`torchaudio==2.6.*`，CUDA 环境优先按 CUDA 12.4 wheel 配置。
-10. README 没写 Transformers 版本时，优先尝试 `transformers==4.55.*`。
-11. import 失败通常优先怀疑环境太新；先尝试旧一点的依赖版本。
-12. 包太新就降级，包太旧就升级，CUDA/torch 不匹配就换匹配的 PyTorch/CUDA 组合。
-13. 每次修复都记录到 `.trae_env/repair_history.md`，并重新执行失败阶段；不能第一次失败就写 `failure_analysis.md`。
-14. 再检查数据集和 checkpoint 路径是否正确。
-15. 不要一报错就修改仓库源码。只有确认是源码和文档运行时不兼容，且环境修复不可行时，才做最小源码修改，并在 `final_report.md` 里说明。
+5. README 的环境配置步骤必须在这个专用 conda 环境里执行，优先每条关键命令都写成 `conda run -n <env> ...`。
+6. `setup.sh`、`download_assets.sh`、`run_reproduction.sh` 中凡是出现 `pip`、`python`、`torchrun`、`accelerate`、`pytest` 或评测命令，都应显式通过 `conda run -n <env> ...` 执行，不能依赖当前 shell 环境。
+7. `pip install` 使用默认镜像源，不额外加 `-i`、`--index-url`、`--extra-index-url`，除非 README 明确要求。
+8. 安装 `flash-attn` 时必须加 `--no-build-isolation`。
+9. 下载 Hugging Face 数据集或模型前使用 `export HF_ENDPOINT=https://hf-mirror.com`；这个镜像只用于 Hugging Face，不用于 pip。
+10. README 没写 PyTorch 版本时，优先尝试 `torch==2.6.*`、`torchvision==0.21.*`、`torchaudio==2.6.*`，CUDA 环境优先按 CUDA 12.4 wheel 配置。
+11. README 没写 Transformers 版本时，优先尝试 `transformers==4.55.*`。
+12. import 失败通常优先怀疑环境太新；先尝试旧一点的依赖版本。
+13. 包太新就降级，包太旧就升级，CUDA/torch 不匹配就换匹配的 PyTorch/CUDA 组合。
+14. 每次修复都记录到 `.trae_env/repair_history.md`，并重新执行失败阶段；不能第一次失败就写 `failure_analysis.md`。
+15. 再检查数据集和 checkpoint 路径是否正确。
+16. 不要一报错就修改仓库源码。只有确认是源码和文档运行时不兼容，且环境修复不可行时，才做最小源码修改，并在 `final_report.md` 里说明。
 
 数据集和 checkpoint 规则：
 
