@@ -372,12 +372,12 @@ def _history_max_chars() -> int:
 
 
 def _llm_request_timeout() -> float:
-    raw_timeout = os.environ.get("TRAE_LLM_REQUEST_TIMEOUT", "180").strip()
+    raw_timeout = os.environ.get("TRAE_LLM_REQUEST_TIMEOUT", "120").strip()
     try:
         timeout = float(raw_timeout)
     except ValueError:
-        return 180.0
-    return timeout if timeout > 0 else 180.0
+        return 120.0
+    return timeout if timeout > 0 else 120.0
 
 
 def _history_keep_messages() -> int:
