@@ -5,6 +5,8 @@
 
 import contextlib
 import os
+import asyncio
+import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -361,6 +363,10 @@ class BaseAgent(ABC):
             tool_results = await self._tool_caller.sequential_tool_call(tool_calls)
         step.tool_results = tool_results
         self._update_cli_console(step)
+
+        tool_results = await self._auto_poll_background_jobs(tool_results, step)
+        step.tool_results = tool_results
+        self._update_cli_console(step)
         for tool_result in tool_results:
             # Add tool result to conversation
             message = LLMMessage(role="user", tool_result=tool_result)
@@ -377,3 +383,88 @@ class BaseAgent(ABC):
             messages.append(LLMMessage(role="assistant", content=reflection))
 
         return messages
+
+    async def _auto_poll_background_jobs(
+        self, tool_results: list[ToolResult], step: AgentStep
+    ) -> list[ToolResult]:
+        """Poll bash background jobs inside the agent loop until they finish."""
+        job_ids = self._extract_background_job_ids(tool_results)
+        if not job_ids:
+            return tool_results
+
+        final_results = list(tool_results)
+        poll_interval = self._background_job_poll_interval()
+
+        for job_id in job_ids:
+            poll_count = 0
+            while True:
+                await asyncio.sleep(poll_interval)
+                poll_count += 1
+                poll_call = ToolCall(
+                    name="bash",
+                    call_id=f"auto_poll_{job_id}_{poll_count}",
+                    arguments={"job_id": job_id},
+                )
+                poll_results = await self._tool_caller.sequential_tool_call([poll_call])
+                poll_result = poll_results[0]
+
+                step.tool_results = self._replace_background_job_result(
+                    final_results, job_id, poll_result
+                )
+                self._update_cli_console(step)
+
+                if self._background_job_poll_is_finished(poll_result):
+                    final_results = self._replace_background_job_result(
+                        final_results, job_id, poll_result
+                    )
+                    break
+
+        return final_results
+
+    def _extract_background_job_ids(self, tool_results: list[ToolResult]) -> list[str]:
+        job_ids: list[str] = []
+        for result in tool_results:
+            text = result.result or ""
+            match = re.search(r"Started background job (job_\d+)", text)
+            if match:
+                job_ids.append(match.group(1))
+        return job_ids
+
+    def _replace_background_job_result(
+        self, tool_results: list[ToolResult], job_id: str, poll_result: ToolResult
+    ) -> list[ToolResult]:
+        replaced: list[ToolResult] = []
+        start_pattern = re.compile(rf"Started background job {re.escape(job_id)}\b")
+        poll_pattern = re.compile(rf"Background job {re.escape(job_id)}\b")
+        inserted = False
+
+        for result in tool_results:
+            text = result.result or ""
+            if start_pattern.search(text) or poll_pattern.search(text):
+                if not inserted:
+                    replaced.append(poll_result)
+                    inserted = True
+                continue
+            replaced.append(result)
+
+        if not inserted:
+            replaced.append(poll_result)
+        return replaced
+
+    def _background_job_poll_is_finished(self, result: ToolResult) -> bool:
+        if not result.success:
+            return True
+        text = result.result or ""
+        return (
+            "finished with returncode" in text
+            or "was terminated by request" in text
+            or "not found" in text
+        )
+
+    def _background_job_poll_interval(self) -> float:
+        raw_interval = os.environ.get("TRAE_JOB_POLL_INTERVAL", "10").strip()
+        try:
+            interval = float(raw_interval)
+        except ValueError:
+            return 10.0
+        return max(interval, 1.0)

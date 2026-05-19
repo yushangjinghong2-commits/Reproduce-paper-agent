@@ -685,6 +685,7 @@ class BashTool(Tool):
             recorded_returncode = job["returncode"]
             returncode = int(recorded_returncode) if isinstance(recorded_returncode, int) else None
 
+        progress_summary = self._background_job_progress_summary(job, log_path)
         tail = self._read_log_tail(log_path)
         command = str(job.get("command", ""))
         if returncode is None:
@@ -692,7 +693,8 @@ class BashTool(Tool):
                 output=(
                     f"Background job {job_id} is still running.\n"
                     f"PID/process group: {job.get('pid')}\n"
-                    f"Log: {log_path}\n\n"
+                    f"Log: {log_path}\n"
+                    f"{progress_summary}\n\n"
                     f"===== LOG TAIL =====\n{tail}"
                 ),
                 error_code=0,
@@ -707,11 +709,24 @@ class BashTool(Tool):
         return ToolExecResult(
             output=(
                 f"Background job {job_id} finished with returncode {returncode}.\n"
-                f"Log: {log_path}\n\n"
+                f"Log: {log_path}\n"
+                f"{progress_summary}\n\n"
                 f"===== LOG TAIL =====\n{tail}"
             ),
             error_code=returncode,
         )
+
+    def _background_job_progress_summary(self, job: dict[str, object], log_path: Path) -> str:
+        try:
+            log_size = log_path.stat().st_size
+        except OSError:
+            return "Log progress: unavailable"
+
+        previous_size_raw = job.get("last_log_size")
+        previous_size = previous_size_raw if isinstance(previous_size_raw, int) else None
+        delta = log_size if previous_size is None else log_size - previous_size
+        job["last_log_size"] = log_size
+        return f"Log progress: {log_size} bytes total, {delta} bytes since last poll"
 
     def _read_log_tail(self, log_path: Path, max_chars: int = 12000) -> str:
         try:

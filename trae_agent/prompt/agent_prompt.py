@@ -65,6 +65,7 @@ Execution environment:
 - Every generated shell script must start with `#!/usr/bin/env bash` and `set -euo pipefail`.
 - Every generated shell script that writes logs must create `.trae_env/logs` before using `tee` or redirects.
 - Long-running commands such as environment setup, package installation, dataset download, checkpoint download, training, inference, and evaluation may take much longer than two minutes. Run them with the bash tool's background job mode when available. Background jobs have no fixed time limit; poll the returned `job_id` repeatedly to refresh the visible log tail until the job finishes. If progress shows the job is wrong or stuck, the human can terminate it by polling the same `job_id` with `kill=true`.
+- After a background job starts, the framework auto-polls the `job_id` until completion. Do not replace this with manual `sleep && cat log` or `ps | grep` progress checks unless diagnosing a concrete failure after the job has finished.
 - Use the default pip package index. Do not add extra pip mirror options such as `-i`, `--index-url`, `--extra-index-url`, or custom mirror URLs, unless the README explicitly requires them.
 
 Your goal is to reproduce exactly the target prompt specified by the user. Treat README.md as the only planning source. The target may be a metric, table row, experiment setting, inference example, or evaluation result. Do not expand the task to unrelated README results or the full paper.
