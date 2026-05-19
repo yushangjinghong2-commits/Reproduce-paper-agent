@@ -496,10 +496,10 @@ class BashTool(Tool):
                     return (
                         f"{resolved} contains a torch requirement that can install torch>=2.6: "
                         f"`{unsafe_requirement}`. Rewrite or override it so torch remains `<2.6`, "
-                        "then verify with `conda run -n <env> python -c \"import torch; print(torch.__version__)\"`. "
+                        "then verify with `conda run -n <env> python -c \"import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())\"`. "
                         "If a previous install already upgraded torch, reinstall with "
-                        "`conda run -n <env> pip install --force-reinstall \"torch<2.6\" torchvision torchaudio` "
-                        "using the default pip index."
+                        "`conda run -n <env> pip install --force-reinstall \"torch==2.5.1+cu124\" \"torchvision==0.20.1+cu124\" \"torchaudio==2.5.1+cu124\"` "
+                        "using the default configured pip index."
                     )
         return None
 
@@ -604,17 +604,18 @@ class BashTool(Tool):
                 f"Detected disallowed torch version `{version}`. This reproduction task requires torch<2.6. "
                 "Classify this as dependency_too_new, record the evidence in `.trae_env/repair_history.md`, "
                 "then repair the dedicated conda environment with "
-                "`conda run -n <env> pip install --force-reinstall \"torch<2.6\" torchvision torchaudio` "
-                "using the default pip index. Do not switch to CPU fallback."
+                "`conda run -n <env> pip install --force-reinstall \"torch==2.5.1+cu124\" \"torchvision==0.20.1+cu124\" \"torchaudio==2.5.1+cu124\"` "
+                "using the default configured pip index. Do not switch to CPU fallback."
             )
 
         if re.search(r"CUDA\s+available\s*:\s*False", combined_output, re.IGNORECASE):
             return (
-                "Detected `CUDA available: False` in the dedicated environment. Do not switch to CPU fallback "
-                "unless README explicitly documents CPU-only evaluation for the target. First classify this as "
-                "pytorch_cuda, inspect torch/Python/CUDA versions, reinstall or downgrade torch to a compatible "
-                "`torch<2.6` build using the default pip index, record the repair in `.trae_env/repair_history.md`, "
-                "and rerun the failed command."
+                "Detected `CUDA available: False` in the dedicated environment. Treat this as an incorrect "
+                "torch/torchvision/torchaudio CUDA build. Do not switch to CPU fallback. Classify this as "
+                "pytorch_cuda, record the evidence in `.trae_env/repair_history.md`, then reinstall the CUDA 12.4 "
+                "triplet with `conda run -n <env> pip install --force-reinstall \"torch==2.5.1+cu124\" "
+                "\"torchvision==0.20.1+cu124\" \"torchaudio==2.5.1+cu124\"` using the default configured pip index. "
+                "Verify `torch.version.cuda` is `12.4` and `torch.cuda.is_available()` is true, then rerun the failed command."
             )
         return None
 

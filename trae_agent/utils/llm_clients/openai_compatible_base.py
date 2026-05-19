@@ -104,6 +104,7 @@ class OpenAICompatibleClient(BaseLLMClient):
             "top_p": model_config.top_p,
             "extra_headers": extra_headers if extra_headers else None,
             "n": 1,
+            "timeout": _llm_request_timeout(),
             **token_params,
         }
 
@@ -208,6 +209,12 @@ class OpenAICompatibleClient(BaseLLMClient):
                 else None
             ),
         )
+        if not llm_response.content and not llm_response.tool_calls:
+            llm_response.content = (
+                "RECOVERABLE_EMPTY_LLM_RESPONSE: The model provider returned an empty assistant "
+                "response without tool calls. Retry the previous step with a concise tool call or "
+                "short status response."
+            )
 
         # Update message history
         if parse_error_content:
@@ -221,17 +228,17 @@ class OpenAICompatibleClient(BaseLLMClient):
                 ChatCompletionAssistantMessageParam(
                     role="assistant",
                     content=llm_response.content,
-                            tool_calls=[
-                                ChatCompletionMessageToolCallParam(
-                                    id=tool_call.call_id,
-                                    function=Function(
-                                        name=tool_call.name,
-                                        arguments=json.dumps(
-                                            _sanitize_tool_arguments(tool_call.arguments)
-                                        ),
-                                    ),
-                                    type="function",
-                                )
+                    tool_calls=[
+                        ChatCompletionMessageToolCallParam(
+                            id=tool_call.call_id,
+                            function=Function(
+                                name=tool_call.name,
+                                arguments=json.dumps(
+                                    _sanitize_tool_arguments(tool_call.arguments)
+                                ),
+                            ),
+                            type="function",
+                        )
                         for tool_call in llm_response.tool_calls
                     ],
                 )
@@ -364,6 +371,15 @@ def _history_max_chars() -> int:
     return _positive_int_from_env("TRAE_LLM_HISTORY_MAX_CHARS", 120000)
 
 
+def _llm_request_timeout() -> float:
+    raw_timeout = os.environ.get("TRAE_LLM_REQUEST_TIMEOUT", "180").strip()
+    try:
+        timeout = float(raw_timeout)
+    except ValueError:
+        return 180.0
+    return timeout if timeout > 0 else 180.0
+
+
 def _history_keep_messages() -> int:
     return _positive_int_from_env("TRAE_LLM_HISTORY_KEEP_MESSAGES", 30)
 
@@ -374,6 +390,10 @@ def _tool_result_history_max_chars() -> int:
 
 def _tool_argument_history_max_chars() -> int:
     return _positive_int_from_env("TRAE_TOOL_ARGUMENT_HISTORY_MAX_CHARS", 1200)
+
+
+def _error_context_lines() -> int:
+    return _positive_int_from_env("TRAE_ERROR_CONTEXT_LINES", 5)
 
 
 def _positive_int_from_env(name: str, default: int) -> int:
@@ -391,16 +411,10 @@ def _history_char_count(messages: list[ChatCompletionMessageParam]) -> int:
 def _compact_chat_history(
     messages: list[ChatCompletionMessageParam],
 ) -> list[ChatCompletionMessageParam]:
-    if _history_char_count(messages) <= _history_max_chars():
-        return messages
     if len(messages) <= 4:
         return messages
 
     prefix = messages[:2]
-    suffix = messages[2:][-_history_keep_messages():]
-    while suffix and dict(suffix[0]).get("role") == "tool":
-        suffix = suffix[1:]
-
     summary = ChatCompletionUserMessageParam(
         role="user",
         content=(
@@ -409,10 +423,25 @@ def _compact_chat_history(
             "latest visible tool result and inspect files/logs directly when needed."
         ),
     )
-    return prefix + [summary] + suffix
+    if _history_char_count(messages) <= _history_max_chars():
+        return messages
+
+    keep_count = min(_history_keep_messages(), max(len(messages) - 2, 1))
+    while keep_count > 0:
+        suffix = [_sanitize_history_message(message) for message in messages[2:][-keep_count:]]
+        while suffix and dict(suffix[0]).get("role") == "tool":
+            suffix = suffix[1:]
+        compacted = prefix + [summary] + suffix
+        if _history_char_count(compacted) <= _history_max_chars() or keep_count <= 4:
+            return compacted
+        keep_count = max(keep_count // 2, 4)
+
+    return prefix + [summary]
 
 
 def _truncate_history_text(text: str, max_chars: int) -> str:
+    if _looks_like_error_output(text):
+        return _condense_error_context(text)
     if len(text) <= max_chars:
         return text
     head = max_chars // 2
@@ -432,3 +461,81 @@ def _sanitize_tool_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         else:
             sanitized[key] = value
     return sanitized
+
+
+def _sanitize_history_message(message: ChatCompletionMessageParam) -> ChatCompletionMessageParam:
+    raw = dict(message)
+    role = raw.get("role")
+
+    if isinstance(raw.get("content"), str):
+        max_chars = _tool_result_history_max_chars() if role in {"tool", "function"} else 3000
+        raw["content"] = _truncate_history_text(raw["content"], max_chars)
+
+    tool_calls = raw.get("tool_calls")
+    if isinstance(tool_calls, list):
+        sanitized_tool_calls = []
+        for tool_call in tool_calls:
+            tool_call_raw = dict(tool_call)
+            function = tool_call_raw.get("function")
+            if isinstance(function, dict):
+                arguments = function.get("arguments")
+                if isinstance(arguments, str):
+                    function = dict(function)
+                    function["arguments"] = _sanitize_tool_arguments_json(arguments)
+                    tool_call_raw["function"] = function
+            sanitized_tool_calls.append(tool_call_raw)
+        raw["tool_calls"] = sanitized_tool_calls
+
+    return raw  # type: ignore[return-value]
+
+
+def _sanitize_tool_arguments_json(arguments: str) -> str:
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError:
+        return _truncate_history_text(arguments, _tool_argument_history_max_chars())
+    if not isinstance(parsed, dict):
+        return arguments
+    return json.dumps(_sanitize_tool_arguments(parsed))
+
+
+def _looks_like_error_output(text: str) -> bool:
+    lower = text.lower()
+    markers = [
+        "tool call failed with error",
+        "traceback",
+        "error:",
+        "exception",
+        "failed",
+        "cuda",
+        "importerror",
+        "modulenotfounderror",
+        "returncode",
+        "dependency_too_new",
+        "pytorch_cuda",
+    ]
+    return any(marker in lower for marker in markers)
+
+
+def _condense_error_context(text: str) -> str:
+    lines = text.splitlines()
+    context = _error_context_lines()
+    if len(lines) <= context * 2:
+        return text
+
+    important_lines = [
+        line
+        for line in lines
+        if ".trae_env/logs" in line or line.startswith("Log:") or line.startswith("command:")
+    ]
+    head = lines[:context]
+    tail = lines[-context:]
+    omitted = len(lines) - len(head) - len(tail)
+    parts = [
+        f"[error output condensed to first {context} lines and last {context} lines; {omitted} middle lines omitted]",
+        *head,
+    ]
+    if important_lines:
+        parts.extend(["[important log references]", *important_lines[:5]])
+    parts.extend(["...[middle error output omitted]...", *tail])
+    return "\n".join(parts)

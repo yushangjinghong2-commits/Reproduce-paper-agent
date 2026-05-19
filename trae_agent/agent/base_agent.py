@@ -245,7 +245,7 @@ class BaseAgent(ABC):
             tool_calls = llm_response.tool_calls
             if (
                 not tool_calls
-                and llm_response.content.startswith("RECOVERABLE_TOOL_CALL_PARSE_ERROR")
+                and llm_response.content.startswith("RECOVERABLE_")
             ):
                 return [LLMMessage(role="user", content=llm_response.content)]
             if not tool_calls and llm_response.finish_reason == "length":

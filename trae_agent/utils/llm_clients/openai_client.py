@@ -58,6 +58,7 @@ class OpenAIClient(BaseLLMClient):
             else openai.NOT_GIVEN,
             top_p=model_config.top_p,
             max_output_tokens=model_config.max_tokens,
+            timeout=_llm_request_timeout(),
         )
 
     @override
@@ -167,6 +168,12 @@ class OpenAIClient(BaseLLMClient):
             finish_reason=response.status,
             tool_calls=tool_calls if len(tool_calls) > 0 else None,
         )
+        if not llm_response.content and not llm_response.tool_calls:
+            llm_response.content = (
+                "RECOVERABLE_EMPTY_LLM_RESPONSE: The model provider returned an empty assistant "
+                "response without tool calls. Retry the previous step with a concise tool call or "
+                "short status response."
+            )
 
         # Record trajectory if recorder is available
         if self.trajectory_recorder:
@@ -206,7 +213,7 @@ class OpenAIClient(BaseLLMClient):
         return ResponseFunctionToolCallParam(
             call_id=tool_call.call_id,
             name=tool_call.name,
-            arguments=json.dumps(tool_call.arguments),
+            arguments=json.dumps(_sanitize_tool_arguments(tool_call.arguments)),
             type="function_call",
         )
 
@@ -231,6 +238,15 @@ def _history_max_chars() -> int:
     return _positive_int_from_env("TRAE_LLM_HISTORY_MAX_CHARS", 120000)
 
 
+def _llm_request_timeout() -> float:
+    raw_timeout = os.environ.get("TRAE_LLM_REQUEST_TIMEOUT", "180").strip()
+    try:
+        timeout = float(raw_timeout)
+    except ValueError:
+        return 180.0
+    return timeout if timeout > 0 else 180.0
+
+
 def _history_keep_messages() -> int:
     return _positive_int_from_env("TRAE_LLM_HISTORY_KEEP_MESSAGES", 30)
 
@@ -241,6 +257,10 @@ def _tool_result_history_max_chars() -> int:
 
 def _tool_argument_history_max_chars() -> int:
     return _positive_int_from_env("TRAE_TOOL_ARGUMENT_HISTORY_MAX_CHARS", 1200)
+
+
+def _error_context_lines() -> int:
+    return _positive_int_from_env("TRAE_ERROR_CONTEXT_LINES", 5)
 
 
 def _positive_int_from_env(name: str, default: int) -> int:
@@ -256,16 +276,10 @@ def _history_char_count(messages: ResponseInputParam) -> int:
 
 
 def _compact_response_history(messages: ResponseInputParam) -> ResponseInputParam:
-    if _history_char_count(messages) <= _history_max_chars():
-        return messages
     if len(messages) <= 4:
         return messages
 
     prefix = messages[:2]
-    suffix = messages[2:][-_history_keep_messages():]
-    while suffix and dict(suffix[0]).get("type") == "function_call_output":
-        suffix = suffix[1:]
-
     summary: EasyInputMessageParam = {
         "role": "user",
         "content": (
@@ -274,10 +288,25 @@ def _compact_response_history(messages: ResponseInputParam) -> ResponseInputPara
             "latest visible tool result and inspect files/logs directly when needed."
         ),
     }
-    return prefix + [summary] + suffix
+    if _history_char_count(messages) <= _history_max_chars():
+        return messages
+
+    keep_count = min(_history_keep_messages(), max(len(messages) - 2, 1))
+    while keep_count > 0:
+        suffix = [_sanitize_response_history_message(message) for message in messages[2:][-keep_count:]]
+        while suffix and dict(suffix[0]).get("type") == "function_call_output":
+            suffix = suffix[1:]
+        compacted = prefix + [summary] + suffix
+        if _history_char_count(compacted) <= _history_max_chars() or keep_count <= 4:
+            return compacted
+        keep_count = max(keep_count // 2, 4)
+
+    return prefix + [summary]
 
 
 def _truncate_history_text(text: str, max_chars: int) -> str:
+    if _looks_like_error_output(text):
+        return _condense_error_context(text)
     if len(text) <= max_chars:
         return text
     head = max_chars // 2
@@ -303,3 +332,79 @@ def _sanitize_tool_arguments_json(arguments: str) -> str:
         else:
             sanitized[key] = value
     return json.dumps(sanitized)
+
+
+def _sanitize_tool_arguments(arguments: dict[str, object]) -> dict[str, object]:
+    sanitized: dict[str, object] = {}
+    max_chars = _tool_argument_history_max_chars()
+    for key, value in arguments.items():
+        if isinstance(value, str):
+            sanitized[key] = _truncate_history_text(value, max_chars)
+        else:
+            sanitized[key] = value
+    return sanitized
+
+
+def _sanitize_response_history_message(message: object) -> object:
+    raw = dict(message)  # type: ignore[arg-type]
+    content = raw.get("content")
+    message_type = raw.get("type")
+    role = raw.get("role")
+    if isinstance(content, str):
+        max_chars = (
+            _tool_result_history_max_chars()
+            if message_type == "function_call_output"
+            else 3000
+        )
+        raw["content"] = _truncate_history_text(content, max_chars)
+    output = raw.get("output")
+    if isinstance(output, str):
+        raw["output"] = _truncate_history_text(output, _tool_result_history_max_chars())
+    arguments = raw.get("arguments")
+    if isinstance(arguments, str):
+        raw["arguments"] = _sanitize_tool_arguments_json(arguments)
+    if role == "assistant" and isinstance(content, str):
+        raw["content"] = _truncate_history_text(content, 3000)
+    return raw
+
+
+def _looks_like_error_output(text: str) -> bool:
+    lower = text.lower()
+    markers = [
+        "tool call failed with error",
+        "traceback",
+        "error:",
+        "exception",
+        "failed",
+        "cuda",
+        "importerror",
+        "modulenotfounderror",
+        "returncode",
+        "dependency_too_new",
+        "pytorch_cuda",
+    ]
+    return any(marker in lower for marker in markers)
+
+
+def _condense_error_context(text: str) -> str:
+    lines = text.splitlines()
+    context = _error_context_lines()
+    if len(lines) <= context * 2:
+        return text
+
+    important_lines = [
+        line
+        for line in lines
+        if ".trae_env/logs" in line or line.startswith("Log:") or line.startswith("command:")
+    ]
+    head = lines[:context]
+    tail = lines[-context:]
+    omitted = len(lines) - len(head) - len(tail)
+    parts = [
+        f"[error output condensed to first {context} lines and last {context} lines; {omitted} middle lines omitted]",
+        *head,
+    ]
+    if important_lines:
+        parts.extend(["[important log references]", *important_lines[:5]])
+    parts.extend(["...[middle error output omitted]...", *tail])
+    return "\n".join(parts)

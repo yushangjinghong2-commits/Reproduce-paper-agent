@@ -69,7 +69,10 @@ class EnvSetupAgent(TraeAgent):
             "transformers 4.55.x, then adjust versions based on concrete errors. If README or README-referenced requirements "
             "specifies torch, follow it but enforce torch<2.6. After any requirements install, verify torch version; "
             "if torch is >=2.6, classify it as dependency_too_new and immediately reinstall/downgrade torch inside "
-            "the dedicated conda environment before continuing. Never add torch index-url or extra-index-url. "
+            "the dedicated conda environment before continuing. For any CUDA error, classify it as pytorch_cuda and "
+            "reinstall the torch/torchvision/torchaudio CUDA 12.4 triplet, preferably `torch==2.5.1+cu124`, "
+            "`torchvision==0.20.1+cu124`, and `torchaudio==2.5.1+cu124`, using the default configured pip index. "
+            "Never add torch index-url or extra-index-url. "
             "For Hugging Face datasets/models, use HF_ENDPOINT=https://hf-mirror.com. Install flash-attn from the "
             "FlashAttention v2.8.3 prebuilt wheel URL by replacing the torch tag and cp tag with the dedicated conda "
             "environment's actual torch major.minor and Python cp version; fall back to `--no-build-isolation` source "
@@ -140,6 +143,8 @@ class EnvSetupAgent(TraeAgent):
     ) -> list[LLMMessage]:
         if self._tries_to_write_setup_script(tool_calls):
             return [LLMMessage(role="user", content=self.no_setup_script_message())]
+        if self._should_redirect_cuda_bypass(tool_calls, step):
+            return [LLMMessage(role="user", content=self.cuda_repair_message())]
         if self._should_redirect_environment_failure_summary(tool_calls, step):
             return [LLMMessage(role="user", content=self.environment_repair_message())]
         return await super()._tool_call_handler(tool_calls, step)
@@ -199,6 +204,68 @@ class EnvSetupAgent(TraeAgent):
             return False
         return any(self._is_report_or_metric_write(call) for call in tool_calls)
 
+    def _should_redirect_cuda_bypass(
+        self, tool_calls: list[ToolCall] | None, step: AgentStep
+    ) -> bool:
+        if not tool_calls or step.llm_response is None:
+            return False
+        response_lower = step.llm_response.content.lower()
+        cuda_markers = [
+            "cuda library issue",
+            "cuda libraries",
+            "cuda unavailable",
+            "cuda is unavailable",
+            "cuda available: false",
+            "pytorch_cuda",
+            "torch/cuda",
+        ]
+        bypass_markers = [
+            "simpler approach",
+            "shouldn't prevent",
+            "should not prevent",
+            "just download",
+            "continue with",
+            "run the evaluation",
+            "cpu fallback",
+            "use cpu",
+            "without cuda",
+        ]
+        if not any(marker in response_lower for marker in cuda_markers):
+            return False
+        if not any(marker in response_lower for marker in bypass_markers):
+            return False
+        return not any(self._is_cuda_repair_tool_call(call) for call in tool_calls)
+
+    def _is_cuda_repair_tool_call(self, tool_call: ToolCall) -> bool:
+        if tool_call.name != "bash":
+            return False
+        command = str(tool_call.arguments.get("command", "")).lower()
+        repair_markers = [
+            "repair_history.md",
+            "pip install",
+            "force-reinstall",
+            "torch<2.6",
+            "torch==",
+            "pip show torch",
+            "python -c",
+            "torch.__version__",
+            "torch.cuda",
+        ]
+        return any(marker in command for marker in repair_markers)
+
+    def cuda_repair_message(self) -> str:
+        return (
+            "STOP. CUDA/PyTorch validation failure cannot be bypassed by downloading assets or running evaluation. "
+            "Do not use CPU fallback. A CUDA error means the current torch, torchvision, and torchaudio CUDA builds are wrong. "
+            "First repair the dedicated conda environment: "
+            "1) inspect and record the CUDA/PyTorch error in `.trae_env/repair_history.md` with category `pytorch_cuda`; "
+            "2) check versions with `conda run -n <env> python -c \"import sys, torch; print(sys.version); print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())\"`; "
+            "3) reinstall the CUDA 12.4 triplet inside the same env using the default configured pip index, e.g. "
+            "`conda run -n <env> pip install --force-reinstall \"torch==2.5.1+cu124\" \"torchvision==0.20.1+cu124\" \"torchaudio==2.5.1+cu124\"`; "
+            "4) verify `torch.version.cuda` is `12.4` and `torch.cuda.is_available()` is true; "
+            "5) rerun the validation or failed reproduction command only after CUDA/PyTorch validation is repaired."
+        )
+
     def _is_report_or_metric_write(self, tool_call: ToolCall) -> bool:
         if tool_call.name != "str_replace_based_edit_tool":
             return False
@@ -222,8 +289,8 @@ class EnvSetupAgent(TraeAgent):
             "1) inspect the latest `.trae_env/logs/` error; "
             "2) if an import is missing, install that package inside the dedicated conda env with `conda run -n <env> pip install ...`; "
             "3) if an import/API error suggests the environment is too new, downgrade the relevant package version with a direct `conda run -n <env> pip install ...` command; "
-            "4) if torch is `>=2.6` or CUDA is unavailable because of a torch/CUDA mismatch, classify it as dependency_too_new or pytorch_cuda and run `conda run -n <env> pip install --force-reinstall \"torch<2.6\" torchvision torchaudio` using the default pip index; "
-            "5) do not switch to CPU fallback unless README explicitly documents CPU-only evaluation for the target; "
+            "4) if any CUDA error occurs, classify it as pytorch_cuda and reinstall the CUDA 12.4 triplet with `conda run -n <env> pip install --force-reinstall \"torch==2.5.1+cu124\" \"torchvision==0.20.1+cu124\" \"torchaudio==2.5.1+cu124\"` using the default configured pip index; "
+            "5) do not switch to CPU fallback; "
             "6) record the category, evidence, and repair action in `.trae_env/repair_history.md`; "
             "7) rerun setup/download/run as needed. "
             "Only write `results_comparison.md` or `.trae_env/reproduced_metrics.json` after an actual successful reproduction command produces real values."
@@ -318,6 +385,6 @@ class EnvSetupAgent(TraeAgent):
             "3) extract real reproduced values from execution logs into `.trae_env/reproduced_metrics.json`; "
             "4) write `results_comparison.md` with the actual original/reproduced values and differences; "
             "5) if a command failed, inspect logs, classify the failure in `.trae_env/repair_history.md`, repair setup/download/run scripts, and retry; "
-            "6) if torch was installed as `>=2.6` or CUDA became unavailable due to torch/CUDA mismatch, reinstall/downgrade torch inside the dedicated conda environment instead of using CPU fallback. "
+            "6) if torch was installed as `>=2.6` or any CUDA error occurred, reinstall the CUDA 12.4 torch/torchvision/torchaudio triplet inside the dedicated conda environment instead of using CPU fallback. "
             "Only call `task_done` after these checks pass. After three rejected completion attempts, the framework will stop the run as an error."
         )
