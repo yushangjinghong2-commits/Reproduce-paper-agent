@@ -7,14 +7,19 @@ import json
 from pathlib import Path
 from typing import override
 
-from trae_agent.agent.agent_basics import AgentError
+from trae_agent.agent.agent_basics import AgentError, AgentStep
 from trae_agent.agent.trae_agent import TraeAgent
 from trae_agent.prompt.agent_prompt import ENV_SETUP_SYSTEM_PROMPT
+from trae_agent.tools.base import ToolCall
 from trae_agent.utils.llm_clients.llm_basics import LLMMessage, LLMResponse
 
 
 class EnvSetupAgent(TraeAgent):
     """Trae agent variant for README-driven reproduction tasks."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._rejected_completion_count = 0
 
     @override
     def get_system_prompt(self) -> str:
@@ -40,7 +45,6 @@ class EnvSetupAgent(TraeAgent):
             f"{issue}\n\n"
             "[Required outputs]:\n"
             "- repro_plan.md\n"
-            "- setup.sh\n"
             "- download_assets.sh\n"
             "- run_reproduction.sh\n"
             "- .trae_env/logs/\n"
@@ -55,7 +59,8 @@ class EnvSetupAgent(TraeAgent):
             "Call task_done only after bash run_reproduction.sh succeeds and results_comparison.md compares "
             "the reproduced target result with the original README result/value when present. Use Linux/WSL bash commands "
             "and write generated scripts with repository-relative paths. Read only README.md for planning, "
-            "first plan environment setup commands, then identify the README command that completes the target, "
+            "first plan environment setup commands, execute those environment setup commands one by one in bash without writing setup.sh, "
+            "then identify the README command that completes the target, "
             "then derive dataset/model/checkpoint downloads required by that command. When creating environments, specify "
             "the README Python version, or python=3.12 if README gives no version. Always create a dedicated conda "
             "environment for the target repository and run README setup/reproduction commands inside it; do not reuse the "
@@ -63,8 +68,10 @@ class EnvSetupAgent(TraeAgent):
             "omits versions, prefer `pip install \"torch<2.6\" torchvision torchaudio` from the default pip index and "
             "transformers 4.55.x, then adjust versions based on concrete errors. If README or README-referenced requirements "
             "specifies torch, follow it but enforce torch<2.6. Never add torch index-url or extra-index-url. "
-            "For Hugging Face datasets/models, use HF_ENDPOINT=https://hf-mirror.com. Install flash-attn "
-            "with --no-build-isolation. "
+            "For Hugging Face datasets/models, use HF_ENDPOINT=https://hf-mirror.com. Install flash-attn from the "
+            "FlashAttention v2.8.3 prebuilt wheel URL by replacing the torch tag and cp tag with the dedicated conda "
+            "environment's actual torch major.minor and Python cp version; fall back to `--no-build-isolation` source "
+            "install only after recording why the wheel is unavailable. "
             "Do not expand to unrelated README results. Do not use Docker.\n"
         )
         self._initial_messages = [
@@ -106,6 +113,7 @@ class EnvSetupAgent(TraeAgent):
         if self._comparison_reports_failure(comparison_file):
             return False
 
+        self._rejected_completion_count = 0
         return True
 
     @override
@@ -123,6 +131,100 @@ class EnvSetupAgent(TraeAgent):
             "reproduction completed",
         ]
         return any(marker in response_lower for marker in textual_completion_markers)
+
+    @override
+    async def _tool_call_handler(
+        self, tool_calls: list[ToolCall] | None, step: AgentStep
+    ) -> list[LLMMessage]:
+        if self._tries_to_write_setup_script(tool_calls):
+            return [LLMMessage(role="user", content=self.no_setup_script_message())]
+        if self._should_redirect_environment_failure_summary(tool_calls, step):
+            return [LLMMessage(role="user", content=self.environment_repair_message())]
+        return await super()._tool_call_handler(tool_calls, step)
+
+    def _tries_to_write_setup_script(self, tool_calls: list[ToolCall] | None) -> bool:
+        if not tool_calls:
+            return False
+        for tool_call in tool_calls:
+            if tool_call.name != "str_replace_based_edit_tool":
+                continue
+            command = str(tool_call.arguments.get("command", ""))
+            path = str(tool_call.arguments.get("path", "")).lower()
+            if command in {"create", "str_replace", "insert"} and path.endswith("setup.sh"):
+                return True
+        return False
+
+    def no_setup_script_message(self) -> str:
+        return (
+            "Do not create or edit `setup.sh` for environment installation. "
+            "Execute environment setup as direct bash commands one by one instead: "
+            "`conda create -n <env> python=<version> -y`, then "
+            "`conda run -n <env> pip install ...` for each README/requirements dependency. "
+            "Record failed environment repairs in `.trae_env/repair_history.md`, then retry the failed command."
+        )
+
+    def _should_redirect_environment_failure_summary(
+        self, tool_calls: list[ToolCall] | None, step: AgentStep
+    ) -> bool:
+        if not tool_calls or step.llm_response is None:
+            return False
+        response_lower = step.llm_response.content.lower()
+        environment_failure_markers = [
+            "unable to run",
+            "unable to execute",
+            "cannot run",
+            "can't run",
+            "environment issue",
+            "environment issues",
+            "environment problem",
+            "dependency issue",
+            "dependency issues",
+            "import error",
+            "import failure",
+            "missing package",
+        ]
+        summary_markers = [
+            "based on the readme",
+            "expected values",
+            "document that",
+            "create a summary",
+            "create the required files",
+            "supposed to be reproduced",
+        ]
+        if not any(marker in response_lower for marker in environment_failure_markers):
+            return False
+        if not any(marker in response_lower for marker in summary_markers):
+            return False
+        return any(self._is_report_or_metric_write(call) for call in tool_calls)
+
+    def _is_report_or_metric_write(self, tool_call: ToolCall) -> bool:
+        if tool_call.name != "str_replace_based_edit_tool":
+            return False
+        command = str(tool_call.arguments.get("command", ""))
+        if command not in {"create", "str_replace", "insert"}:
+            return False
+        path = str(tool_call.arguments.get("path", "")).lower()
+        blocked_targets = [
+            "results_comparison.md",
+            "final_report.md",
+            "failure_analysis.md",
+            ".trae_env/reproduced_metrics.json",
+        ]
+        return any(path.endswith(target) for target in blocked_targets)
+
+    def environment_repair_message(self) -> str:
+        return (
+            "STOP. Do not turn an environment failure into a README-based summary or expected-value report. "
+            "The reproduced metrics must come from a successful run, not from README values. "
+            "Continue repairing the environment instead: "
+            "1) inspect the latest `.trae_env/logs/` error; "
+            "2) if an import is missing, install that package inside the dedicated conda env with `conda run -n <env> pip install ...`; "
+            "3) if an import/API error suggests the environment is too new, downgrade the relevant package version with a direct `conda run -n <env> pip install ...` command; "
+            "4) keep torch constrained to `<2.6` and do not add pip index URLs; "
+            "5) record the category, evidence, and repair action in `.trae_env/repair_history.md`; "
+            "6) rerun setup/download/run as needed. "
+            "Only write `results_comparison.md` or `.trae_env/reproduced_metrics.json` after an actual successful reproduction command produces real values."
+        )
 
     def _has_reproduced_result(self, metrics: object) -> bool:
         """Accept only real, non-empty reproduced metrics/results."""
@@ -199,16 +301,19 @@ class EnvSetupAgent(TraeAgent):
 
     @override
     def abort_on_rejected_completion(self) -> bool:
-        return True
+        self._rejected_completion_count += 1
+        return self._rejected_completion_count >= 3
 
     @override
     def task_incomplete_message(self) -> str:
         return (
             "ERROR! The requested reproduction task is not complete. `task_done` is rejected. "
-            "A valid completion requires successful `bash run_reproduction.sh`, "
-            ".trae_env/reproduction_verification.json with returncode 0, "
-            ".trae_env/reproduced_metrics.json containing real non-empty reproduced metrics/results, "
-            "and results_comparison.md without blocked/failed/not-executed language. "
-            "If the task is blocked, keep the run failed and write failure_analysis.md with exact evidence; "
-            "do not call task_done without real reproduced scores."
+            "Do not repeat `task_done`. Continue the reproduction workflow now. "
+            "Check which required artifact is missing or invalid: "
+            "1) run `bash run_reproduction.sh` if it has not completed successfully; "
+            "2) ensure `.trae_env/reproduction_verification.json` has returncode 0; "
+            "3) extract real reproduced values from execution logs into `.trae_env/reproduced_metrics.json`; "
+            "4) write `results_comparison.md` with the actual original/reproduced values and differences; "
+            "5) if a command failed, inspect logs, classify the failure in `.trae_env/repair_history.md`, repair setup/download/run scripts, and retry. "
+            "Only call `task_done` after these checks pass. After three rejected completion attempts, the framework will stop the run as an error."
         )

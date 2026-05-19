@@ -162,7 +162,7 @@ chmod +x scripts/run_repro.sh
 ./scripts/run_repro.sh --working-dir ../target-repo --target "复现目标提示词"
 ```
 
-这个命令默认会让 agent 在目标仓库里只读取 `README.md`。读完后执行顺序是：先规划环境配置命令；再判断为了完成你的 `--target` 应该跑 README 里的哪条推理/评测命令；最后根据这条命令需要的输入，下载对应数据集、checkpoint、模型或样例输入。`--working-dir` 可以写相对路径；脚本会在内部解析成绝对路径传给 Trae CLI，但 agent 在目标仓库中生成的 `setup.sh`、`download_assets.sh`、`run_reproduction.sh` 会优先使用仓库相对路径。
+这个命令默认会让 agent 在目标仓库里只读取 `README.md`。读完后执行顺序是：先规划环境配置命令，并在命令行中逐条执行 conda/pip 环境命令；再判断为了完成你的 `--target` 应该跑 README 里的哪条推理/评测命令；最后根据这条命令需要的输入，下载对应数据集、checkpoint、模型或样例输入。`--working-dir` 可以写相对路径；脚本会在内部解析成绝对路径传给 Trae CLI，但 agent 在目标仓库中生成的 `download_assets.sh`、`run_reproduction.sh` 会优先使用仓库相对路径。
 
 如果你想补充额外要求，可以自定义任务提示，但默认约束仍然是只用 README 规划，并且只复现 `--target` 指定的目标：
 
@@ -218,10 +218,10 @@ chmod +x scripts/run_repro.sh
 4. 根据这条命令反推需要哪些数据集、checkpoint、模型或样例输入。
 5. 从 README 中提取这个目标对应的原始结果或参考值。
 6. 生成 `repro_plan.md`，其中顺序为环境命令、目标运行命令、该命令所需资产、成功标准。
-7. 生成 `setup.sh`。
+7. 不生成 `setup.sh`；环境安装通过命令行逐条执行，例如 `conda create ...`、`conda run -n <env> pip install ...`。
 8. 生成 `run_reproduction.sh`，用于执行目标命令。
 9. 生成 `download_assets.sh`，只下载目标命令需要的数据集、checkpoint、模型或样例输入。
-10. 依次执行 setup、下载、复现命令。
+10. 依次执行环境命令、下载脚本、复现脚本。
 11. 提取复现结果到 `.trae_env/reproduced_metrics.json`。
 12. 提取原始结果到 `.trae_env/original_metrics.json`。
 13. 生成 `results_comparison.md`，只对比这个目标的原始结果、复现结果、数值差异和波动分析。
@@ -233,7 +233,6 @@ chmod +x scripts/run_repro.sh
 
 ```text
 repro_plan.md
-setup.sh
 download_assets.sh
 run_reproduction.sh
 results_comparison.md
@@ -325,9 +324,9 @@ failure_analysis.md
 3. 必须先为目标仓库创建专用 conda 环境，不能直接复用当前 shell 环境、base 环境或 Trae 自己的环境。
 4. 创建 conda 环境时必须指定 Python 版本；README 写明版本就使用 README 版本，没写时默认 `python=3.12`。
 5. README 的环境配置步骤必须在这个专用 conda 环境里执行，优先每条关键命令都写成 `conda run -n <env> ...`。
-6. `setup.sh`、`download_assets.sh`、`run_reproduction.sh` 中凡是出现 `pip`、`python`、`torchrun`、`accelerate`、`pytest` 或评测命令，都应显式通过 `conda run -n <env> ...` 执行，不能依赖当前 shell 环境。
+6. 环境安装不要写 `setup.sh`，而是在命令行逐条执行；`download_assets.sh`、`run_reproduction.sh` 中凡是出现 `pip`、`python`、`torchrun`、`accelerate`、`pytest` 或评测命令，都应显式通过 `conda run -n <env> ...` 执行，不能依赖当前 shell 环境。
 7. `pip install` 使用默认镜像源，不额外加 `-i`、`--index-url`、`--extra-index-url`，除非 README 明确要求。
-8. 安装 `flash-attn` 时必须加 `--no-build-isolation`。
+8. 安装 `flash-attn` 时优先使用 FlashAttention v2.8.3 的预编译 wheel，不直接源码编译。根据专用 conda 环境里的 Python 版本和 torch 版本替换 URL 中的 `cp` 与 `torch` 标签，例如从 `flash_attn-2.8.3+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl` 改成当前环境对应的 `torch2.5`、`cp311` 等。只有预编译 wheel 不存在时，才记录原因并回退到 `pip install flash-attn --no-build-isolation`。
 9. 下载 Hugging Face 数据集或模型前使用 `export HF_ENDPOINT=https://hf-mirror.com`；这个镜像只用于 Hugging Face，不用于 pip。
 10. torch 版本以 README 或 README 指向的 requirements 文件为准，但必须限制为 `<2.6`。README/requirements 没写 torch 版本时，优先使用默认 pip 源安装小于 2.6 的 torch：`pip install "torch<2.6" torchvision torchaudio`。不要为 torch 安装额外指定 `-i`、`--index-url`、`--extra-index-url` 或 CUDA wheel index URL。
 11. README 没写 Transformers 版本时，优先尝试 `transformers==4.55.*`。
@@ -336,6 +335,16 @@ failure_analysis.md
 14. 每次修复都记录到 `.trae_env/repair_history.md`，并重新执行失败阶段；不能第一次失败就写 `failure_analysis.md`。
 15. 再检查数据集和 checkpoint 路径是否正确。
 16. 不要一报错就修改仓库源码。只有确认是源码和文档运行时不兼容，且环境修复不可行时，才做最小源码修改，并在 `final_report.md` 里说明。
+17. 如果评测因环境、依赖或 import 错误跑不起来，不能改成抄 README 的期望值生成结果表。必须继续逐条执行安装缺失包、降级不兼容包等环境修复命令并重试。
+
+`flash-attn` 预编译 wheel 安装模板：
+
+```bash
+PYTAG=$(conda run -n <env> python -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')
+TORCH_TAG=$(conda run -n <env> python -c 'import torch; v=torch.__version__.split("+")[0].split("."); print(f"torch{v[0]}.{v[1]}")')
+FLASH_WHL="https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12${TORCH_TAG}cxx11abiFALSE-${PYTAG}-${PYTAG}-linux_x86_64.whl"
+conda run -n <env> pip install "$FLASH_WHL"
+```
 
 数据集和 checkpoint 规则：
 
@@ -366,7 +375,7 @@ agent 只有在以下条件满足后才允许结束：
 - 禁止 `sudo rm -rf`。
 - 禁止破坏性 `git clean -fd`。
 - 长输出会写入日志并截断返回，避免上下文爆炸。
-- `setup.sh`、`download_assets.sh`、`run_reproduction.sh`、`pip install`、`conda create/install`、`wget/curl`、`huggingface-cli download` 等长命令会自动作为后台 job 运行，立即返回 `job_id`。
+- `download_assets.sh`、`run_reproduction.sh`、`pip install`、`conda create/install`、`wget/curl`、`huggingface-cli download` 等长命令会自动作为后台 job 运行，立即返回 `job_id`。
 - 后台 job 没有固定时间上限；框架会自动用 `job_id` 轮询进度，直到日志显示 job 结束，再把结果交回给模型执行下一步。
 - 轮询会刷新显示 `.trae_env/logs/job_xxxx.log` 的尾部内容、日志总字节数、距离上次轮询新增字节数，用于观察安装、下载、推理或评测进度。
 - 如果人判断任务卡住或方向错误，可以用同一个 `job_id` 加 `kill=true` 终止该后台任务。
