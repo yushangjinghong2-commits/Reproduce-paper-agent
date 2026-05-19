@@ -84,5 +84,15 @@ def _retry_forever_on_timeout(error: Exception) -> bool:
         "connection error",
         "remoteprotocolerror",
         "no response",
+        "rate limit",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+        "temporarily unavailable",
     ]
     return any(marker in error_name or marker in error_text for marker in timeout_markers)

@@ -219,7 +219,23 @@ class BaseAgent(ABC):
         step.state = AgentStepState.THINKING
         self._update_cli_console(step, execution)
         # Get LLM response
-        llm_response = self._llm_client.chat(messages, self._model_config, self._tools)
+        try:
+            llm_response = self._llm_client.chat(messages, self._model_config, self._tools)
+        except Exception as error:
+            if self._is_recoverable_llm_error(error):
+                recoverable_message = (
+                    "RECOVERABLE_LLM_REQUEST_ERROR: The LLM request failed with a transient "
+                    f"provider/network/server error: {type(error).__name__}: {error}. "
+                    "Retry the previous step with a concise response or tool call."
+                )
+                step.llm_response = LLMResponse(
+                    content=recoverable_message,
+                    model=self._model_config.model,
+                    finish_reason="recoverable_error",
+                )
+                self._update_cli_console(step, execution)
+                return [LLMMessage(role="user", content=recoverable_message)]
+            raise
         step.llm_response = llm_response
 
         # Display step with LLM response
@@ -305,6 +321,32 @@ class BaseAgent(ABC):
     def abort_on_rejected_completion(self) -> bool:
         """Whether to stop the run when the LLM tries to finish before validation passes."""
         return False
+
+    def _is_recoverable_llm_error(self, error: Exception) -> bool:
+        error_name = type(error).__name__.lower()
+        error_text = str(error).lower()
+        recoverable_markers = [
+            "timeout",
+            "timed out",
+            "readtimeout",
+            "connecttimeout",
+            "apitimeout",
+            "connection error",
+            "remoteprotocolerror",
+            "server disconnected",
+            "no response",
+            "rate limit",
+            "429",
+            "500",
+            "502",
+            "503",
+            "504",
+            "bad gateway",
+            "service unavailable",
+            "gateway timeout",
+            "temporarily unavailable",
+        ]
+        return any(marker in error_name or marker in error_text for marker in recoverable_markers)
 
     @abstractmethod
     async def cleanup_mcp_clients(self) -> None:

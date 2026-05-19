@@ -435,8 +435,8 @@ class BashTool(Tool):
         offending_line = self._find_torch_install_without_lt26(command)
         if offending_line:
             return (
-                "torch installs must enforce torch<2.6 and use the default pip index. "
-                "Use README/requirements torch constraints when present, but add/keep an upper bound below 2.6. "
+                "torch installs must enforce torch<2.6, torchaudio<2.6, and torchvision<2.6 using the default pip index. "
+                "Use README/requirements torch constraints when present, but add/keep upper bounds below 2.6 for the full PyTorch package triplet. "
                 f"First offending command: {offending_line}"
             )
         requirements_issue = self._find_requirements_torch_issue(command, self._candidate_base_dirs(command))
@@ -453,8 +453,8 @@ class BashTool(Tool):
             offending_line = self._find_torch_install_without_lt26(script_text)
             if offending_line:
                 return (
-                    f"{script_name} contains a torch install without enforcing torch<2.6. "
-                    "Use README/requirements torch constraints when present, but add/keep an upper bound below 2.6. "
+                    f"{script_name} contains a torch install without enforcing torch<2.6, torchaudio<2.6, and torchvision<2.6. "
+                    "Use README/requirements torch constraints when present, but add/keep upper bounds below 2.6 for the full PyTorch package triplet. "
                     f"First offending line: {offending_line}"
                 )
             requirements_issue = self._find_requirements_torch_issue(
@@ -473,9 +473,17 @@ class BashTool(Tool):
                 continue
             if not re.search(r"(?:^|\s)[\"']?torch(?:\[.*?\])?(?:[<=>!~]=?[^\"'\s]+)?[\"']?", line):
                 continue
-            if re.search(r"[\"']?torch(?:\[.*?\])?\s*<\s*2\.6[\"']?", line):
+            if (
+                re.search(r"[\"']?torch(?:\[.*?\])?\s*<\s*2\.6[\"']?", line)
+                and re.search(r"[\"']?torchaudio(?:\[.*?\])?\s*<\s*2\.6[\"']?", line)
+                and re.search(r"[\"']?torchvision(?:\[.*?\])?\s*<\s*2\.6[\"']?", line)
+            ):
                 continue
-            if re.search(r"[\"']?torch(?:\[.*?\])?\s*==\s*(?:[01](?:\.\d+)*|2\.[0-5](?:\.\d+)*)", line):
+            if (
+                re.search(r"[\"']?torch(?:\[.*?\])?\s*==\s*(?:[01](?:\.\d+)*|2\.[0-5](?:\.\d+)*)", line)
+                and re.search(r"[\"']?torchaudio(?:\[.*?\])?\s*(?:<\s*2\.6|==\s*(?:[01](?:\.\d+)*|2\.[0-5](?:\.\d+)*))", line)
+                and re.search(r"[\"']?torchvision(?:\[.*?\])?\s*(?:<\s*2\.6|==\s*(?:[01](?:\.\d+)*|2\.[0-5](?:\.\d+)*))", line)
+            ):
                 continue
             return raw_line.strip()
         return None
@@ -498,7 +506,7 @@ class BashTool(Tool):
                         f"`{unsafe_requirement}`. Rewrite or override it so torch remains `<2.6`, "
                         "then verify with `conda run -n <env> python -c \"import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())\"`. "
                         "If a previous install already upgraded torch, reinstall with "
-                        "`conda run -n <env> pip install --force-reinstall \"torch==2.5.1+cu124\" \"torchvision==0.20.1+cu124\" \"torchaudio==2.5.1+cu124\"` "
+                        "`pip install --force-reinstall \"torch<2.6\" \"torchaudio<2.6\" \"torchvision<2.6\"` "
                         "using the default configured pip index."
                     )
         return None
@@ -604,18 +612,18 @@ class BashTool(Tool):
                 f"Detected disallowed torch version `{version}`. This reproduction task requires torch<2.6. "
                 "Classify this as dependency_too_new, record the evidence in `.trae_env/repair_history.md`, "
                 "then repair the dedicated conda environment with "
-                "`conda run -n <env> pip install --force-reinstall \"torch==2.5.1+cu124\" \"torchvision==0.20.1+cu124\" \"torchaudio==2.5.1+cu124\"` "
+                "`pip install --force-reinstall \"torch<2.6\" \"torchaudio<2.6\" \"torchvision<2.6\"` "
                 "using the default configured pip index. Do not switch to CPU fallback."
             )
 
         if re.search(r"CUDA\s+available\s*:\s*False", combined_output, re.IGNORECASE):
             return (
                 "Detected `CUDA available: False` in the dedicated environment. Treat this as an incorrect "
-                "torch/torchvision/torchaudio CUDA build. Do not switch to CPU fallback. Classify this as "
-                "pytorch_cuda, record the evidence in `.trae_env/repair_history.md`, then reinstall the CUDA 12.4 "
-                "triplet with `conda run -n <env> pip install --force-reinstall \"torch==2.5.1+cu124\" "
-                "\"torchvision==0.20.1+cu124\" \"torchaudio==2.5.1+cu124\"` using the default configured pip index. "
-                "Verify `torch.version.cuda` is `12.4` and `torch.cuda.is_available()` is true, then rerun the failed command."
+                "torch/torchvision/torchaudio installation. Do not switch to CPU fallback. Classify this as "
+                "pytorch_cuda, record the evidence in `.trae_env/repair_history.md`, then reinstall with "
+                "`pip install --force-reinstall \"torch<2.6\" \"torchaudio<2.6\" \"torchvision<2.6\"` "
+                "using the default configured pip index. Verify torch imports and `torch.cuda.is_available()` is true, "
+                "then rerun the failed command."
             )
         return None
 
@@ -639,7 +647,11 @@ class BashTool(Tool):
 
     def _validate_reproduction_environment_usage(self, command: str) -> str | None:
         direct_unscoped = self._find_unscoped_environment_commands(command)
-        if direct_unscoped and not self._is_setup_command(command):
+        if (
+            direct_unscoped
+            and not self._is_setup_command(command)
+            and not self._is_allowed_direct_torch_repair(command)
+        ):
             return (
                 "Commands that use python/pip/torchrun/accelerate must run inside the dedicated conda environment. "
                 "Use `conda run -n <env> ...` instead of executing them directly. "
@@ -694,6 +706,22 @@ class BashTool(Tool):
                     f"First offending line: {unscoped}"
                 )
         return None
+
+    def _is_allowed_direct_torch_repair(self, command: str) -> bool:
+        """Allow the user-requested direct pip repair command after env activation."""
+        for raw_line in command.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if not re.search(r"\bpip(?:\d+(?:\.\d+)?)?\s+install\b", line):
+                continue
+            if (
+                re.search(r"[\"']?torch(?:\[.*?\])?\s*<\s*2\.6[\"']?", line)
+                and re.search(r"[\"']?torchaudio(?:\[.*?\])?\s*<\s*2\.6[\"']?", line)
+                and re.search(r"[\"']?torchvision(?:\[.*?\])?\s*<\s*2\.6[\"']?", line)
+            ):
+                return True
+        return False
 
     def _find_unscoped_environment_commands(self, script_text: str) -> str | None:
         env_commands = (
