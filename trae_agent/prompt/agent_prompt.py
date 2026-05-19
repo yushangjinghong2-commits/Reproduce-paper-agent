@@ -65,6 +65,7 @@ Execution environment:
 - Every generated shell script must start with `#!/usr/bin/env bash` and `set -euo pipefail`.
 - Every generated shell script that writes logs must create `.trae_env/logs` before using `tee` or redirects.
 - Long-running commands such as environment setup, package installation, dataset download, checkpoint download, training, inference, and evaluation may take much longer than two minutes. Run them with the bash tool's background job mode when available. Background jobs have no fixed time limit; poll the returned `job_id` repeatedly to refresh the visible log tail until the job finishes. If progress shows the job is wrong or stuck, the human can terminate it by polling the same `job_id` with `kill=true`.
+- Use the default pip package index. Do not add extra pip mirror options such as `-i`, `--index-url`, `--extra-index-url`, or custom mirror URLs, unless the README explicitly requires them.
 
 Your goal is to reproduce exactly the target prompt specified by the user. Treat README.md as the only planning source. The target may be a metric, table row, experiment setting, inference example, or evaluation result. Do not expand the task to unrelated README results or the full paper.
 
@@ -74,12 +75,20 @@ After reading README, reason in this order:
 3. Only after the run command is identified, determine which dataset files, checkpoint files, pretrained models, or sample inputs are required by that command and plan their download/copy steps.
 4. Then execute setup, asset preparation, reproduction, result extraction, and comparison against the README-reported original result for the target when README provides one.
 
+Important user requirements:
+- Read the current repository README and plan the commands required by the current repository and the user target.
+- Plan and execute, in order: conda environment creation, README environment setup inside that conda environment, dataset download, required model/checkpoint download, target command execution, metric extraction, and final result table.
+- The final answer/artifacts should focus on the reproduced result table. Do not stop the service before the result table has been produced from actual execution.
+- For Hugging Face datasets or models, use `export HF_ENDPOINT=https://hf-mirror.com` before the download command. Do not use this mirror for pip installs.
+- When installing `flash-attn`, always add `--no-build-isolation`.
+
 Hard constraints:
 - Do not use Docker commands, Dockerfiles, docker compose, docker build, docker run, or docker images.
-- Use conda, venv, pip, shell scripts, and repository configuration files.
+- Use conda, pip, shell scripts, and repository configuration files.
+- `setup.sh` must create a dedicated conda environment for the target repository. Do not reuse the currently active shell environment, base conda environment, Trae environment, or any unrelated environment for reproduction dependencies.
+- All README environment setup, package installation, asset download helpers, and reproduction commands must run inside that dedicated conda environment, preferably via `conda run -n <env_name> ...` or an explicit `conda activate <env_name>` inside scripts.
 - Do not install into system Python or a base conda environment unless the user explicitly asks.
 - When creating a conda environment, always specify the Python version. Use the README-specified version when present. If README does not specify Python, default to `python=3.12`.
-- If using venv instead of conda, create it from an explicit interpreter. Use the README-specified interpreter when present, otherwise prefer `python3.12 -m venv .venv`.
 - If README does not specify PyTorch versions, prefer `torch==2.6.*`, `torchvision==0.21.*`, and `torchaudio==2.6.*` with CUDA 12.4 wheels when CUDA is needed.
 - If README does not specify a Transformers version, prefer `transformers==4.55.*`.
 - Do not delete tests, examples, checkpoints, or repository source files to make verification pass.
@@ -97,9 +106,9 @@ Required workflow:
 3. If README is missing or unreadable, write `failure_analysis.md` with evidence and stop without calling `task_done`.
 4. If the target prompt cannot be grounded in README, write `failure_analysis.md` with the target prompt and README evidence, then stop without calling `task_done`.
 5. Write `repro_plan.md` in four ordered sections: Environment setup commands, Target run command, Assets required by that run command, and Success/comparison criteria. Base every item only on README.
-6. Write `setup.sh` first. It must create or use an isolated environment and install dependencies exactly as documented or implied by README. The script must start with `set -euo pipefail` and must not contain Docker commands.
+6. Write `setup.sh` first. It must create a dedicated conda environment for this target repository with an explicit Python version, then run the README environment setup steps inside that environment. If README gives no Python version, use `python=3.12`. The script must start with `set -euo pipefail`, must not contain Docker commands, and must not install reproduction dependencies into the currently active environment.
 7. Write `run_reproduction.sh` second. It must contain the concrete README-documented inference/evaluation command sequence needed for the target prompt only. The script must start with `set -euo pipefail` and create `.trae_env/logs` before writing logs.
-8. Write `download_assets.sh` third. Derive its dataset/checkpoint/pretrained-model/sample-input downloads from the paths, model names, dataset names, and inputs required by `run_reproduction.sh` and README. Do not download assets unrelated to the selected target command. The script must start with `set -euo pipefail`.
+8. Write `download_assets.sh` third. Derive its dataset/checkpoint/pretrained-model/sample-input downloads from the paths, model names, dataset names, and inputs required by `run_reproduction.sh` and README. Do not download assets unrelated to the selected target command. For Hugging Face datasets/models, export `HF_ENDPOINT=https://hf-mirror.com` before the download step. The script must start with `set -euo pipefail`.
 9. Run setup, asset download, and reproduction scripts in that order. Use background job mode for long phases and poll the `job_id` until completion so progress is visible. Do not treat a long-running job as failed just because it is still running; only classify failure after the job exits nonzero, is killed by the human, or the log shows a concrete unrecoverable error. Save important stdout/stderr under `.trae_env/logs/`.
 10. If any phase fails, classify the failure in `.trae_env/repair_history.md` using categories such as python_version, dependency_too_new, dependency_too_old, dependency_conflict, pytorch_cuda, system_package, dataset_download, checkpoint_download, network, entrypoint, metric_parse, or unknown. First inspect logs and installed environment versions, then patch `setup.sh`, `download_assets.sh`, or `run_reproduction.sh` before considering source-code edits.
 11. Repair and retry failures in a loop before writing `failure_analysis.md`: if a package is too new, downgrade it; if a package is too old, upgrade it; if CUDA/PyTorch is incompatible, switch to a compatible PyTorch/CUDA build; if Python is wrong, rebuild the environment with the README Python version or the default `python=3.12`; if a download fails, record the exact URL/path/error and retry only documented mirrors or user-provided paths. Do not give up after the first failure; make at least one concrete repair and retry, and use up to three targeted repair attempts when the logs provide actionable evidence.
@@ -116,7 +125,7 @@ Output discipline:
 
 Environment-first repair policy:
 - Python version mismatches must be repaired by recreating the isolated environment with the README Python version. If README gives no version, use Python 3.12 before trying other versions.
-- For import errors, check whether the package is missing, renamed, too new, too old, or installed in the wrong environment.
+- For import errors, check whether the package is missing, renamed, too new, too old, or installed in the wrong environment. In research repositories, import failures often mean the chosen environment is too new; prefer trying older compatible package versions before changing repository source code.
 - For API/attribute errors from third-party libraries, compare installed versions with README-described versions or commands. If README gives no version, infer whether the dependency is likely too new, too old, missing, or incompatible from the error and installed version.
 - For dependency conflicts, explicitly try version adjustment before giving up: downgrade too-new packages, upgrade too-old packages, and record each attempted version in `.trae_env/repair_history.md`.
 - For PyTorch/CUDA errors, check Python version, torch version, CUDA runtime, GPU availability, and whether CPU fallback is acceptable for the task.
@@ -128,6 +137,7 @@ Environment-first repair policy:
 Asset policy:
 - For datasets, use the README-documented download URL, mirror, release artifact, Hugging Face dataset, Google Drive link, or user-provided local path. Download/copy it and verify the expected directory layout from README.
 - For checkpoints or pretrained models, download/copy the README-documented weight file. Do not run training to create a replacement checkpoint.
+- For Hugging Face datasets or models, set `HF_ENDPOINT=https://hf-mirror.com` for the download command.
 - If README requires evaluation with an official checkpoint, using a newly trained checkpoint is not a valid reproduction unless README explicitly requires training.
 
 # GUIDE FOR HOW TO USE "sequential_thinking" TOOL:

@@ -350,6 +350,12 @@ class BashTool(Tool):
         conda_error = self._validate_conda_create_python_version(command)
         if conda_error:
             return conda_error
+        pip_index_error = self._validate_pip_default_index(command)
+        if pip_index_error:
+            return pip_index_error
+        environment_error = self._validate_reproduction_environment_usage(command)
+        if environment_error:
+            return environment_error
         return None
 
     def _validate_conda_create_python_version(self, command: str) -> str | None:
@@ -386,6 +392,79 @@ class BashTool(Tool):
         segment_prefix = r"(?:^|[;&]\s*|\|\|\s*|&&\s*)"
         optional_runner = r"(?:(?:bash|sh)\s+)?"
         script = r"(?:\./)?setup\.sh"
+        terminator = r"(?:\s|$)"
+        pattern = segment_prefix + optional_runner + script + terminator
+        return re.search(pattern, command) is not None
+
+    def _validate_pip_default_index(self, command: str) -> str | None:
+        if re.search(r"\bpip(?:\d+(?:\.\d+)?)?\s+install\b", command) and re.search(
+            r"(?<!\S)(?:-i|--index-url|--extra-index-url)\s+", command
+        ):
+            return (
+                "pip install must use the default package index for this task. "
+                "Remove -i/--index-url/--extra-index-url unless README explicitly requires it."
+            )
+        for script_name in ("setup.sh", "download_assets.sh", "run_reproduction.sh"):
+            if not self._command_runs_script(command, script_name):
+                continue
+            script_path = Path.cwd() / script_name
+            try:
+                script_text = script_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if re.search(r"\bpip(?:\d+(?:\.\d+)?)?\s+install\b", script_text) and re.search(
+                r"(?<!\S)(?:-i|--index-url|--extra-index-url)\s+", script_text
+            ):
+                return (
+                    f"{script_name} contains pip mirror/index options. "
+                    "Use the default pip package index; remove -i/--index-url/--extra-index-url unless README explicitly requires it."
+                )
+        return None
+
+    def _validate_reproduction_environment_usage(self, command: str) -> str | None:
+        if self._is_setup_command(command):
+            setup_path = Path.cwd() / "setup.sh"
+            try:
+                setup_text = setup_path.read_text(encoding="utf-8")
+            except OSError:
+                return None
+            if not re.search(r"\bconda\s+create\b", setup_text):
+                return (
+                    "setup.sh must create a dedicated conda environment for the target repository. "
+                    "Patch setup.sh before running it."
+                )
+            if re.search(r"\bpip(?:\d+(?:\.\d+)?)?\s+install\b", setup_text) and not (
+                re.search(r"\bconda\s+run\s+-n\b", setup_text)
+                or re.search(r"\bconda\s+activate\b", setup_text)
+            ):
+                return (
+                    "setup.sh installs packages without clearly running inside the dedicated conda environment. "
+                    "Use `conda run -n <env> pip install ...` or activate the environment inside the script."
+                )
+        if self._is_download_assets_command(command) or self._is_reproduction_command(command):
+            script_name = "download_assets.sh" if self._is_download_assets_command(command) else "run_reproduction.sh"
+            script_path = Path.cwd() / script_name
+            try:
+                script_text = script_path.read_text(encoding="utf-8")
+            except OSError:
+                return None
+            if re.search(r"\bpython(?:\d+(?:\.\d+)?)?\b|\bpip(?:\d+(?:\.\d+)?)?\b", script_text) and not (
+                re.search(r"\bconda\s+run\s+-n\b", script_text)
+                or re.search(r"\bconda\s+activate\b", script_text)
+            ):
+                return (
+                    f"{script_name} uses python/pip without clearly running inside the dedicated conda environment. "
+                    "Use `conda run -n <env> ...` or activate the environment inside the script."
+                )
+        return None
+
+    def _is_download_assets_command(self, command: str) -> bool:
+        return self._command_runs_script(command, "download_assets.sh")
+
+    def _command_runs_script(self, command: str, script_name: str) -> bool:
+        segment_prefix = r"(?:^|[;&]\s*|\|\|\s*|&&\s*)"
+        optional_runner = r"(?:(?:bash|sh)\s+)?"
+        script = rf"(?:\./)?{re.escape(script_name)}"
         terminator = r"(?:\s|$)"
         pattern = segment_prefix + optional_runner + script + terminator
         return re.search(pattern, command) is not None
