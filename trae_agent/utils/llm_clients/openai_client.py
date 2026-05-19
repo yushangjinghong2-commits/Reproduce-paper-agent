@@ -4,6 +4,8 @@
 """OpenAI API client wrapper with tool integration."""
 
 import json
+import os
+from typing import Any
 from typing import override
 
 import openai
@@ -73,6 +75,7 @@ class OpenAIClient(BaseLLMClient):
             self.message_history = self.message_history + openai_messages
         else:
             self.message_history = openai_messages
+        self.message_history = _compact_response_history(self.message_history)
 
         tool_schemas = None
         if tools:
@@ -123,7 +126,7 @@ class OpenAIClient(BaseLLMClient):
                     )
                 )
                 tool_call_param = ResponseFunctionToolCallParam(
-                    arguments=output_block.arguments,
+                    arguments=_sanitize_tool_arguments_json(output_block.arguments),
                     call_id=output_block.call_id,
                     name=output_block.name,
                     type="function_call",
@@ -215,9 +218,88 @@ class OpenAIClient(BaseLLMClient):
         if tool_call_result.error:
             result_content += f"\nError: {tool_call_result.error}"
         result_content = result_content.strip()
+        result_content = _truncate_history_text(result_content, _tool_result_history_max_chars())
 
         return FunctionCallOutput(
             type="function_call_output",  # Explicitly set the type field
             call_id=tool_call_result.call_id,
             output=result_content,
         )
+
+
+def _history_max_chars() -> int:
+    return _positive_int_from_env("TRAE_LLM_HISTORY_MAX_CHARS", 120000)
+
+
+def _history_keep_messages() -> int:
+    return _positive_int_from_env("TRAE_LLM_HISTORY_KEEP_MESSAGES", 30)
+
+
+def _tool_result_history_max_chars() -> int:
+    return _positive_int_from_env("TRAE_TOOL_RESULT_HISTORY_MAX_CHARS", 4000)
+
+
+def _tool_argument_history_max_chars() -> int:
+    return _positive_int_from_env("TRAE_TOOL_ARGUMENT_HISTORY_MAX_CHARS", 1200)
+
+
+def _positive_int_from_env(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _history_char_count(messages: ResponseInputParam) -> int:
+    return sum(len(str(message)) for message in messages)
+
+
+def _compact_response_history(messages: ResponseInputParam) -> ResponseInputParam:
+    if _history_char_count(messages) <= _history_max_chars():
+        return messages
+    if len(messages) <= 4:
+        return messages
+
+    prefix = messages[:2]
+    suffix = messages[2:][-_history_keep_messages():]
+    while suffix and dict(suffix[0]).get("type") == "function_call_output":
+        suffix = suffix[1:]
+
+    summary: EasyInputMessageParam = {
+        "role": "user",
+        "content": (
+            "Older interaction history was compacted to keep the LLM request within a usable size. "
+            "Repository artifacts, scripts, logs, and trajectory files remain on disk. Continue from the "
+            "latest visible tool result and inspect files/logs directly when needed."
+        ),
+    }
+    return prefix + [summary] + suffix
+
+
+def _truncate_history_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    head = max_chars // 2
+    tail = max_chars - head
+    return (
+        f"[history content truncated from {len(text)} chars]\n"
+        f"{text[:head]}\n...[truncated for LLM history]...\n{text[-tail:]}"
+    )
+
+
+def _sanitize_tool_arguments_json(arguments: str) -> str:
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError:
+        return _truncate_history_text(arguments, _tool_argument_history_max_chars())
+    if not isinstance(parsed, dict):
+        return arguments
+    sanitized: dict[str, Any] = {}
+    max_chars = _tool_argument_history_max_chars()
+    for key, value in parsed.items():
+        if isinstance(value, str):
+            sanitized[key] = _truncate_history_text(value, max_chars)
+        else:
+            sanitized[key] = value
+    return json.dumps(sanitized)

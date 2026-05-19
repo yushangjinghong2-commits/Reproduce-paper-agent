@@ -4,6 +4,7 @@
 """Base class for OpenAI-compatible clients with shared logic."""
 
 import json
+import os
 from abc import ABC, abstractmethod
 from typing import Any, override
 
@@ -135,6 +136,7 @@ class OpenAICompatibleClient(BaseLLMClient):
             self.message_history = self.message_history + parsed_messages
         else:
             self.message_history = parsed_messages
+        self.message_history = _compact_chat_history(self.message_history)
 
         tool_schemas = None
         if tools:
@@ -219,15 +221,17 @@ class OpenAICompatibleClient(BaseLLMClient):
                 ChatCompletionAssistantMessageParam(
                     role="assistant",
                     content=llm_response.content,
-                    tool_calls=[
-                        ChatCompletionMessageToolCallParam(
-                            id=tool_call.call_id,
-                            function=Function(
-                                name=tool_call.name,
-                                arguments=json.dumps(tool_call.arguments),
-                            ),
-                            type="function",
-                        )
+                            tool_calls=[
+                                ChatCompletionMessageToolCallParam(
+                                    id=tool_call.call_id,
+                                    function=Function(
+                                        name=tool_call.name,
+                                        arguments=json.dumps(
+                                            _sanitize_tool_arguments(tool_call.arguments)
+                                        ),
+                                    ),
+                                    type="function",
+                                )
                         for tool_call in llm_response.tool_calls
                     ],
                 )
@@ -323,6 +327,7 @@ def _msg_tool_result_handler(messages: list[ChatCompletionMessageParam], msg: LL
             result += "Tool call failed with error:\n"
             result += msg.tool_result.error
         result = result.strip()
+        result = _truncate_history_text(result, _tool_result_history_max_chars())
         messages.append(
             ChatCompletionToolMessageParam(
                 content=result,
@@ -353,3 +358,77 @@ def _msg_role_handler(messages: list[ChatCompletionMessageParam], msg: LLMMessag
                 )
             case _:
                 raise ValueError(f"Invalid message role: {msg.role}")
+
+
+def _history_max_chars() -> int:
+    return _positive_int_from_env("TRAE_LLM_HISTORY_MAX_CHARS", 120000)
+
+
+def _history_keep_messages() -> int:
+    return _positive_int_from_env("TRAE_LLM_HISTORY_KEEP_MESSAGES", 30)
+
+
+def _tool_result_history_max_chars() -> int:
+    return _positive_int_from_env("TRAE_TOOL_RESULT_HISTORY_MAX_CHARS", 4000)
+
+
+def _tool_argument_history_max_chars() -> int:
+    return _positive_int_from_env("TRAE_TOOL_ARGUMENT_HISTORY_MAX_CHARS", 1200)
+
+
+def _positive_int_from_env(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _history_char_count(messages: list[ChatCompletionMessageParam]) -> int:
+    return sum(len(str(message)) for message in messages)
+
+
+def _compact_chat_history(
+    messages: list[ChatCompletionMessageParam],
+) -> list[ChatCompletionMessageParam]:
+    if _history_char_count(messages) <= _history_max_chars():
+        return messages
+    if len(messages) <= 4:
+        return messages
+
+    prefix = messages[:2]
+    suffix = messages[2:][-_history_keep_messages():]
+    while suffix and dict(suffix[0]).get("role") == "tool":
+        suffix = suffix[1:]
+
+    summary = ChatCompletionUserMessageParam(
+        role="user",
+        content=(
+            "Older interaction history was compacted to keep the LLM request within a usable size. "
+            "Repository artifacts, scripts, logs, and trajectory files remain on disk. Continue from the "
+            "latest visible tool result and inspect files/logs directly when needed."
+        ),
+    )
+    return prefix + [summary] + suffix
+
+
+def _truncate_history_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    head = max_chars // 2
+    tail = max_chars - head
+    return (
+        f"[history content truncated from {len(text)} chars]\n"
+        f"{text[:head]}\n...[truncated for LLM history]...\n{text[-tail:]}"
+    )
+
+
+def _sanitize_tool_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    sanitized: dict[str, Any] = {}
+    max_chars = _tool_argument_history_max_chars()
+    for key, value in arguments.items():
+        if isinstance(value, str):
+            sanitized[key] = _truncate_history_text(value, max_chars)
+        else:
+            sanitized[key] = value
+    return sanitized
