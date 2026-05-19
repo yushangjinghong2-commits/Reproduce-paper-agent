@@ -15,6 +15,7 @@ import locale
 import os
 import re
 import signal
+import shlex
 from datetime import datetime
 from pathlib import Path
 from typing import override
@@ -308,6 +309,10 @@ class BashTool(Tool):
         timeout = self._parse_timeout(arguments.get("timeout"))
         try:
             result = await self._session.run(command, timeout=timeout)
+            torch_environment_error = self._detect_torch_environment_error(command, result)
+            if torch_environment_error:
+                result.error = torch_environment_error
+                result.error_code = -1
             return self._record_and_truncate_result(command, result)
         except Exception as e:
             return ToolExecResult(error=f"Error running bash command: {e}", error_code=-1)
@@ -434,10 +439,13 @@ class BashTool(Tool):
                 "Use README/requirements torch constraints when present, but add/keep an upper bound below 2.6. "
                 f"First offending command: {offending_line}"
             )
+        requirements_issue = self._find_requirements_torch_issue(command, self._candidate_base_dirs(command))
+        if requirements_issue:
+            return requirements_issue
         for script_name in ("setup.sh", "download_assets.sh", "run_reproduction.sh"):
-            if not self._command_runs_script(command, script_name):
+            script_path = self._script_path_for_command(command, script_name)
+            if script_path is None:
                 continue
-            script_path = Path.cwd() / script_name
             try:
                 script_text = script_path.read_text(encoding="utf-8")
             except OSError:
@@ -449,6 +457,11 @@ class BashTool(Tool):
                     "Use README/requirements torch constraints when present, but add/keep an upper bound below 2.6. "
                     f"First offending line: {offending_line}"
                 )
+            requirements_issue = self._find_requirements_torch_issue(
+                script_text, [script_path.parent]
+            )
+            if requirements_issue:
+                return f"{script_name} references an unsafe requirements file. {requirements_issue}"
         return None
 
     def _find_torch_install_without_lt26(self, text: str) -> str | None:
@@ -466,6 +479,162 @@ class BashTool(Tool):
                 continue
             return raw_line.strip()
         return None
+
+    def _find_requirements_torch_issue(self, text: str, base_dirs: list[Path]) -> str | None:
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if not re.search(r"\bpip(?:\d+(?:\.\d+)?)?\s+install\b", line):
+                continue
+            for requirements_path in self._extract_requirements_paths(line):
+                resolved = self._resolve_existing_path(requirements_path, base_dirs)
+                if resolved is None:
+                    continue
+                unsafe_requirement = self._find_unsafe_torch_requirement(resolved)
+                if unsafe_requirement:
+                    return (
+                        f"{resolved} contains a torch requirement that can install torch>=2.6: "
+                        f"`{unsafe_requirement}`. Rewrite or override it so torch remains `<2.6`, "
+                        "then verify with `conda run -n <env> python -c \"import torch; print(torch.__version__)\"`. "
+                        "If a previous install already upgraded torch, reinstall with "
+                        "`conda run -n <env> pip install --force-reinstall \"torch<2.6\" torchvision torchaudio` "
+                        "using the default pip index."
+                    )
+        return None
+
+    def _extract_requirements_paths(self, command_line: str) -> list[str]:
+        try:
+            tokens = shlex.split(command_line, posix=os.name != "nt")
+        except ValueError:
+            tokens = command_line.split()
+
+        paths: list[str] = []
+        for index, token in enumerate(tokens):
+            if token in {"-r", "--requirement"} and index + 1 < len(tokens):
+                paths.append(tokens[index + 1])
+                continue
+            if token.startswith("-r") and len(token) > 2:
+                paths.append(token[2:])
+                continue
+            if token.startswith("--requirement="):
+                paths.append(token.split("=", 1)[1])
+        return paths
+
+    def _resolve_existing_path(self, raw_path: str, base_dirs: list[Path]) -> Path | None:
+        cleaned = raw_path.strip().strip("'\"")
+        if not cleaned:
+            return None
+        path = Path(cleaned).expanduser()
+        candidates = [path] if path.is_absolute() else [base / path for base in base_dirs]
+        for candidate in candidates:
+            try:
+                if candidate.exists() and candidate.is_file():
+                    return candidate.resolve()
+            except OSError:
+                continue
+        return None
+
+    def _find_unsafe_torch_requirement(self, requirements_file: Path) -> str | None:
+        try:
+            lines = requirements_file.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        for raw_line in lines:
+            requirement = raw_line.split("#", 1)[0].strip()
+            if not requirement or requirement.startswith(("-", "--")):
+                continue
+            if not re.match(r"torch(?:\[.*?\])?(?:\s|[<=>!~]=?|$)", requirement):
+                continue
+            if re.search(r"torch(?:\[.*?\])?\s*<\s*2\.6", requirement):
+                continue
+            if re.search(r"torch(?:\[.*?\])?\s*==\s*(?:[01](?:\.\d+)*|2\.[0-5](?:\.\d+)*)", requirement):
+                continue
+            return raw_line.strip()
+        return None
+
+    def _candidate_base_dirs(self, command: str) -> list[Path]:
+        base_dirs = [Path.cwd()]
+        cd_patterns = [
+            r"(?:^|[;&|]\s*)cd\s+\"([^\"]+)\"\s*(?:&&|;)",
+            r"(?:^|[;&|]\s*)cd\s+'([^']+)'\s*(?:&&|;)",
+            r"(?:^|[;&|]\s*)cd\s+([^\s;&|]+)\s*(?:&&|;)",
+        ]
+        for pattern in cd_patterns:
+            for match in re.finditer(pattern, command):
+                candidate = Path(match.group(1)).expanduser()
+                if not candidate.is_absolute():
+                    candidate = Path.cwd() / candidate
+                try:
+                    resolved = candidate.resolve()
+                except OSError:
+                    resolved = candidate
+                if resolved not in base_dirs:
+                    base_dirs.append(resolved)
+        return base_dirs
+
+    def _script_path_for_command(self, command: str, script_name: str) -> Path | None:
+        if not self._command_runs_script(command, script_name):
+            return None
+        for base_dir in self._candidate_base_dirs(command):
+            candidate = base_dir / script_name
+            try:
+                if candidate.exists():
+                    return candidate
+            except OSError:
+                continue
+        return Path.cwd() / script_name
+
+    def _detect_torch_environment_error(
+        self, command: str, result: ToolExecResult
+    ) -> str | None:
+        if "torch" not in command.lower():
+            return None
+        if re.search(r"\bpip(?:\d+(?:\.\d+)?)?\s+install\b", command):
+            return None
+        combined_output = "\n".join(
+            part for part in (result.output, result.error) if isinstance(part, str)
+        )
+        if not combined_output:
+            return None
+
+        version = self._extract_reported_torch_version(combined_output)
+        if version and self._torch_version_is_at_least_26(version):
+            return (
+                f"Detected disallowed torch version `{version}`. This reproduction task requires torch<2.6. "
+                "Classify this as dependency_too_new, record the evidence in `.trae_env/repair_history.md`, "
+                "then repair the dedicated conda environment with "
+                "`conda run -n <env> pip install --force-reinstall \"torch<2.6\" torchvision torchaudio` "
+                "using the default pip index. Do not switch to CPU fallback."
+            )
+
+        if re.search(r"CUDA\s+available\s*:\s*False", combined_output, re.IGNORECASE):
+            return (
+                "Detected `CUDA available: False` in the dedicated environment. Do not switch to CPU fallback "
+                "unless README explicitly documents CPU-only evaluation for the target. First classify this as "
+                "pytorch_cuda, inspect torch/Python/CUDA versions, reinstall or downgrade torch to a compatible "
+                "`torch<2.6` build using the default pip index, record the repair in `.trae_env/repair_history.md`, "
+                "and rerun the failed command."
+            )
+        return None
+
+    def _extract_reported_torch_version(self, text: str) -> str | None:
+        patterns = [
+            r"(?:PyTorch|torch)\s+version\s*:\s*([0-9]+(?:\.[0-9]+){1,2}(?:[+a-zA-Z0-9._-]*)?)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return None
+
+    def _torch_version_is_at_least_26(self, version: str) -> bool:
+        match = re.match(r"(\d+)\.(\d+)", version)
+        if not match:
+            return False
+        major = int(match.group(1))
+        minor = int(match.group(2))
+        return (major, minor) >= (2, 6)
 
     def _validate_reproduction_environment_usage(self, command: str) -> str | None:
         direct_unscoped = self._find_unscoped_environment_commands(command)

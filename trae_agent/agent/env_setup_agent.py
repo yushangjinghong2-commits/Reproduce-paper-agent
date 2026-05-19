@@ -67,7 +67,9 @@ class EnvSetupAgent(TraeAgent):
             "currently active environment. Use default pip index settings and do not add pip mirror options. If README "
             "omits versions, prefer `pip install \"torch<2.6\" torchvision torchaudio` from the default pip index and "
             "transformers 4.55.x, then adjust versions based on concrete errors. If README or README-referenced requirements "
-            "specifies torch, follow it but enforce torch<2.6. Never add torch index-url or extra-index-url. "
+            "specifies torch, follow it but enforce torch<2.6. After any requirements install, verify torch version; "
+            "if torch is >=2.6, classify it as dependency_too_new and immediately reinstall/downgrade torch inside "
+            "the dedicated conda environment before continuing. Never add torch index-url or extra-index-url. "
             "For Hugging Face datasets/models, use HF_ENDPOINT=https://hf-mirror.com. Install flash-attn from the "
             "FlashAttention v2.8.3 prebuilt wheel URL by replacing the torch tag and cp tag with the dedicated conda "
             "environment's actual torch major.minor and Python cp version; fall back to `--no-build-isolation` source "
@@ -220,9 +222,10 @@ class EnvSetupAgent(TraeAgent):
             "1) inspect the latest `.trae_env/logs/` error; "
             "2) if an import is missing, install that package inside the dedicated conda env with `conda run -n <env> pip install ...`; "
             "3) if an import/API error suggests the environment is too new, downgrade the relevant package version with a direct `conda run -n <env> pip install ...` command; "
-            "4) keep torch constrained to `<2.6` and do not add pip index URLs; "
-            "5) record the category, evidence, and repair action in `.trae_env/repair_history.md`; "
-            "6) rerun setup/download/run as needed. "
+            "4) if torch is `>=2.6` or CUDA is unavailable because of a torch/CUDA mismatch, classify it as dependency_too_new or pytorch_cuda and run `conda run -n <env> pip install --force-reinstall \"torch<2.6\" torchvision torchaudio` using the default pip index; "
+            "5) do not switch to CPU fallback unless README explicitly documents CPU-only evaluation for the target; "
+            "6) record the category, evidence, and repair action in `.trae_env/repair_history.md`; "
+            "7) rerun setup/download/run as needed. "
             "Only write `results_comparison.md` or `.trae_env/reproduced_metrics.json` after an actual successful reproduction command produces real values."
         )
 
@@ -314,6 +317,7 @@ class EnvSetupAgent(TraeAgent):
             "2) ensure `.trae_env/reproduction_verification.json` has returncode 0; "
             "3) extract real reproduced values from execution logs into `.trae_env/reproduced_metrics.json`; "
             "4) write `results_comparison.md` with the actual original/reproduced values and differences; "
-            "5) if a command failed, inspect logs, classify the failure in `.trae_env/repair_history.md`, repair setup/download/run scripts, and retry. "
+            "5) if a command failed, inspect logs, classify the failure in `.trae_env/repair_history.md`, repair setup/download/run scripts, and retry; "
+            "6) if torch was installed as `>=2.6` or CUDA became unavailable due to torch/CUDA mismatch, reinstall/downgrade torch inside the dedicated conda environment instead of using CPU fallback. "
             "Only call `task_done` after these checks pass. After three rejected completion attempts, the framework will stop the run as an error."
         )
