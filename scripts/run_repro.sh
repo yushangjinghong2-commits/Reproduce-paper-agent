@@ -32,7 +32,7 @@ Options:
   -h, --help               Show this help.
 
 Environment overrides:
-  BASE_URL API_KEY MODEL PROVIDER CONFIG_FILE TRAJECTORY_FILE MAX_STEPS TARGET VIRTUAL_ENV
+  BASE_URL API_KEY MODEL PROVIDER CONFIG_FILE TRAJECTORY_FILE MAX_STEPS TARGET VIRTUAL_ENV USE_UV
 EOF
 }
 
@@ -131,8 +131,15 @@ elif [[ -x ".venv/bin/trae-cli" ]]; then
   TRAE_CLI=".venv/bin/trae-cli"
 elif [[ -x "venv/bin/trae-cli" ]]; then
   TRAE_CLI="venv/bin/trae-cli"
-else
+elif [[ "${USE_UV:-0}" == "1" ]]; then
   TRAE_CLI="uv run trae-cli"
+else
+  echo "Error: trae-cli was not found in the active virtualenv, .venv, or venv." >&2
+  echo "Activate your environment and install this repo first:" >&2
+  echo "  source venv/bin/activate" >&2
+  echo "  pip install -e ." >&2
+  echo "If you intentionally want uv to manage the environment, rerun with USE_UV=1." >&2
+  exit 2
 fi
 
 $TRAE_CLI run "$TASK" \

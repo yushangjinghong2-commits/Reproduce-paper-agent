@@ -280,7 +280,48 @@ class BashTool(Tool):
         for pattern, message in forbidden_patterns:
             if re.search(pattern, normalized):
                 return message
+        conda_error = self._validate_conda_create_python_version(command)
+        if conda_error:
+            return conda_error
         return None
+
+    def _validate_conda_create_python_version(self, command: str) -> str | None:
+        if self._has_conda_create_without_python(command):
+            return (
+                "Conda environment creation must specify a Python version. "
+                "Use the README Python version, or `python=3.12` if README does not specify one."
+            )
+        if self._is_setup_command(command):
+            setup_path = Path.cwd() / "setup.sh"
+            try:
+                setup_text = setup_path.read_text(encoding="utf-8")
+            except OSError:
+                return None
+            if self._has_conda_create_without_python(setup_text):
+                return (
+                    "setup.sh contains `conda create` without an explicit Python version. "
+                    "Patch setup.sh to use the README Python version, or `python=3.12` if README does not specify one."
+                )
+        return None
+
+    def _has_conda_create_without_python(self, text: str) -> bool:
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if re.search(r"\bconda\s+create\b", stripped) and not re.search(
+                r"\bpython\s*=", stripped
+            ):
+                return True
+        return False
+
+    def _is_setup_command(self, command: str) -> bool:
+        segment_prefix = r"(?:^|[;&]\s*|\|\|\s*|&&\s*)"
+        optional_runner = r"(?:(?:bash|sh)\s+)?"
+        script = r"(?:\./)?setup\.sh"
+        terminator = r"(?:\s|$)"
+        pattern = segment_prefix + optional_runner + script + terminator
+        return re.search(pattern, command) is not None
 
     def _record_and_truncate_result(
         self, command: str, result: ToolExecResult

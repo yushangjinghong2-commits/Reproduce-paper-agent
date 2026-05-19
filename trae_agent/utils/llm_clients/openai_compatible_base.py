@@ -5,7 +5,7 @@
 
 import json
 from abc import ABC, abstractmethod
-from typing import override
+from typing import Any, override
 
 import openai
 from openai.types.chat import (
@@ -159,7 +159,9 @@ class OpenAICompatibleClient(BaseLLMClient):
             provider_name=self.provider_config.get_service_name(),
             max_retries=model_config.max_retries,
         )
-        response = retry_decorator(model_config, tool_schemas, extra_headers)
+        response = self._normalize_chat_completion_response(
+            retry_decorator(model_config, tool_schemas, extra_headers)
+        )
 
         choice = response.choices[0]
 
@@ -245,6 +247,41 @@ class OpenAICompatibleClient(BaseLLMClient):
             )
 
         return llm_response
+
+    def _normalize_chat_completion_response(self, response: Any) -> ChatCompletion:
+        if isinstance(response, ChatCompletion):
+            return response
+
+        raw_response = response
+        if isinstance(response, str):
+            try:
+                raw_response = json.loads(response)
+            except json.JSONDecodeError as exc:
+                raise TypeError(
+                    "OpenAI-compatible API returned a plain string instead of a chat "
+                    "completion object. Check that --model-base-url points to the "
+                    "OpenAI-compatible API root, usually ending with /v1, and that the "
+                    "server supports /v1/chat/completions."
+                ) from exc
+
+        if isinstance(raw_response, dict):
+            try:
+                return ChatCompletion.model_validate(raw_response)
+            except Exception as exc:
+                raise TypeError(
+                    "OpenAI-compatible API returned JSON, but it is not a valid chat "
+                    "completion response with choices[]. Check the base URL, model name, "
+                    "and provider compatibility."
+                ) from exc
+
+        if not hasattr(response, "choices"):
+            raise TypeError(
+                "OpenAI-compatible API returned an unsupported response type "
+                f"{type(response).__name__}. Expected a chat completion response with choices[]. "
+                "Check that --model-base-url usually ends with /v1."
+            )
+
+        return response
 
     def parse_messages(self, messages: list[LLMMessage]) -> list[ChatCompletionMessageParam]:
         """Parse LLM messages to OpenAI format."""

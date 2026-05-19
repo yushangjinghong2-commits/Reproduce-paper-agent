@@ -56,7 +56,10 @@ class EnvSetupAgent(TraeAgent):
             "the reproduced target result with the original README result/value when present. Use Linux/WSL bash commands "
             "and write generated scripts with repository-relative paths. Read only README.md for planning, "
             "first plan environment setup commands, then identify the README command that completes the target, "
-            "then derive dataset/model/checkpoint downloads required by that command. Do not expand to unrelated README results. Do not use Docker.\n"
+            "then derive dataset/model/checkpoint downloads required by that command. When creating environments, specify "
+            "the README Python version, or python=3.12 if README gives no version. If README omits versions, prefer "
+            "PyTorch 2.6 with CUDA 12.4 and transformers 4.55.x, then adjust versions based on concrete errors. "
+            "Do not expand to unrelated README results. Do not use Docker.\n"
         )
         self._initial_messages = [
             LLMMessage(role="system", content=self.get_system_prompt()),
@@ -71,24 +74,135 @@ class EnvSetupAgent(TraeAgent):
         verification_file = (
             Path(self.project_path) / ".trae_env" / "reproduction_verification.json"
         )
+        reproduced_metrics_file = (
+            Path(self.project_path) / ".trae_env" / "reproduced_metrics.json"
+        )
         comparison_file = Path(self.project_path) / "results_comparison.md"
         if not verification_file.exists():
+            return False
+        if not reproduced_metrics_file.exists():
             return False
         if not comparison_file.exists():
             return False
 
         try:
             verification = json.loads(verification_file.read_text(encoding="utf-8"))
+            reproduced_metrics = json.loads(
+                reproduced_metrics_file.read_text(encoding="utf-8")
+            )
         except (OSError, json.JSONDecodeError):
             return False
 
-        return int(verification.get("returncode", -1)) == 0
+        if int(verification.get("returncode", -1)) != 0:
+            return False
+        if not self._has_reproduced_result(reproduced_metrics):
+            return False
+        if self._comparison_reports_failure(comparison_file):
+            return False
+
+        return True
+
+    @override
+    def llm_indicates_task_completed(self, llm_response: LLMResponse) -> bool:
+        if super().llm_indicates_task_completed(llm_response):
+            return True
+        if llm_response.tool_calls:
+            return False
+        response_lower = llm_response.content.lower()
+        textual_completion_markers = [
+            "task_done",
+            "i have completed",
+            "completed all required",
+            "completed all deliverables",
+            "reproduction completed",
+        ]
+        return any(marker in response_lower for marker in textual_completion_markers)
+
+    def _has_reproduced_result(self, metrics: object) -> bool:
+        """Accept only real, non-empty reproduced metrics/results."""
+        failure_markers = {
+            "blocked",
+            "failed",
+            "failure",
+            "missing",
+            "not_run",
+            "not run",
+            "not_executed",
+            "not executed",
+            "timeout",
+            "unknown",
+            "n/a",
+            "none",
+        }
+
+        def valid_value(value: object) -> bool:
+            if isinstance(value, (int, float)):
+                return True
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                return bool(normalized) and normalized not in failure_markers
+            return False
+
+        def walk(value: object, parent_key: str = "") -> bool:
+            if isinstance(value, dict):
+                status = value.get("status")
+                if isinstance(status, str) and status.strip().lower() in failure_markers:
+                    return False
+                for key, child in value.items():
+                    key_lower = str(key).lower()
+                    if key_lower in {
+                        "error",
+                        "errors",
+                        "failure",
+                        "failure_reason",
+                        "blocked_reason",
+                    }:
+                        continue
+                    if walk(child, key_lower):
+                        return True
+                return False
+            if isinstance(value, list):
+                return any(walk(item, parent_key) for item in value)
+            if parent_key in {"metric", "name", "target", "status", "note", "notes"}:
+                return False
+            return valid_value(value)
+
+        return walk(metrics)
+
+    def _comparison_reports_failure(self, comparison_file: Path) -> bool:
+        try:
+            text = comparison_file.read_text(encoding="utf-8").lower()
+        except OSError:
+            return True
+        failure_phrases = [
+            "not reproduced",
+            "not executed",
+            "not run",
+            "no reproduced result",
+            "missing reproduced",
+            "blocked",
+            "failed to reproduce",
+            "cannot execute",
+            "无法执行",
+            "没有实际",
+            "未复现",
+            "失败",
+            "阻塞",
+        ]
+        return any(phrase in text for phrase in failure_phrases)
+
+    @override
+    def abort_on_rejected_completion(self) -> bool:
+        return True
 
     @override
     def task_incomplete_message(self) -> str:
         return (
-            "ERROR! The requested reproduction task has not been recorded as successful. "
-            "Run `bash run_reproduction.sh` from the project root, extract the reproduced target result, "
-            "write results_comparison.md comparing it with the original README result/value when present, "
-            "and only then call task_done. If the task is blocked, write failure_analysis.md with exact evidence instead of task_done."
+            "ERROR! The requested reproduction task is not complete. `task_done` is rejected. "
+            "A valid completion requires successful `bash run_reproduction.sh`, "
+            ".trae_env/reproduction_verification.json with returncode 0, "
+            ".trae_env/reproduced_metrics.json containing real non-empty reproduced metrics/results, "
+            "and results_comparison.md without blocked/failed/not-executed language. "
+            "If the task is blocked, keep the run failed and write failure_analysis.md with exact evidence; "
+            "do not call task_done without real reproduced scores."
         )

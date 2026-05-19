@@ -171,7 +171,7 @@ class BaseAgent(ABC):
                     await self._finalize_step(
                         step, messages, execution
                     )  # record trajectory for this step and update the CLI console
-                    if execution.agent_state == AgentState.COMPLETED:
+                    if execution.agent_state != AgentState.RUNNING:
                         break
                     step_number += 1
                 except Exception as error:
@@ -231,6 +231,10 @@ class BaseAgent(ABC):
                 execution.agent_state = AgentState.COMPLETED
                 execution.final_result = llm_response.content
                 execution.success = True
+                return messages
+            if self.abort_on_rejected_completion():
+                execution.agent_state = AgentState.ERROR
+                execution.final_result = self.task_incomplete_message()
                 return messages
             else:
                 execution.agent_state = AgentState.RUNNING
@@ -295,6 +299,10 @@ class BaseAgent(ABC):
     def task_incomplete_message(self) -> str:
         """Return a message indicating that the task is incomplete. Override for custom logic."""
         return "The task is incomplete. Please try again."
+
+    def abort_on_rejected_completion(self) -> bool:
+        """Whether to stop the run when the LLM tries to finish before validation passes."""
+        return False
 
     @abstractmethod
     async def cleanup_mcp_clients(self) -> None:

@@ -77,6 +77,10 @@ Hard constraints:
 - Do not use Docker commands, Dockerfiles, docker compose, docker build, docker run, or docker images.
 - Use conda, venv, pip, shell scripts, and repository configuration files.
 - Do not install into system Python or a base conda environment unless the user explicitly asks.
+- When creating a conda environment, always specify the Python version. Use the README-specified version when present. If README does not specify Python, default to `python=3.12`.
+- If using venv instead of conda, create it from an explicit interpreter. Use the README-specified interpreter when present, otherwise prefer `python3.12 -m venv .venv`.
+- If README does not specify PyTorch versions, prefer `torch==2.6.*`, `torchvision==0.21.*`, and `torchaudio==2.6.*` with CUDA 12.4 wheels when CUDA is needed.
+- If README does not specify a Transformers version, prefer `transformers==4.55.*`.
 - Do not delete tests, examples, checkpoints, or repository source files to make verification pass.
 - Do not modify repository source code as the first response to an error. Most failures in this task are expected to come from environment mismatch, package versions, Python/CUDA/PyTorch compatibility, missing datasets, missing checkpoints, or wrong commands. Prefer fixing environment scripts and asset paths.
 - Only modify source code when there is strong evidence that the repository code is incompatible with the documented runtime and the change is minimal, reversible, and recorded in `final_report.md`.
@@ -97,10 +101,12 @@ Required workflow:
 8. Write `download_assets.sh` third. Derive its dataset/checkpoint/pretrained-model/sample-input downloads from the paths, model names, dataset names, and inputs required by `run_reproduction.sh` and README. Do not download assets unrelated to the selected target command. The script must start with `set -euo pipefail`.
 9. Run setup, asset download, and reproduction scripts in that order. Save important stdout/stderr under `.trae_env/logs/`.
 10. If any phase fails, classify the failure in `.trae_env/repair_history.md` using categories such as python_version, dependency_too_new, dependency_too_old, dependency_conflict, pytorch_cuda, system_package, dataset_download, checkpoint_download, network, entrypoint, metric_parse, or unknown. First inspect logs and installed environment versions, then patch `setup.sh`, `download_assets.sh`, or `run_reproduction.sh` before considering source-code edits.
-11. Extract the reproduced result for the target prompt into `.trae_env/reproduced_metrics.json`.
-12. Extract the original README result/value for the target prompt into `.trae_env/original_metrics.json` when README provides one.
-13. Write `results_comparison.md` for the target prompt with original result/value, reproduced result/value, absolute difference when numeric, relative difference/percentage change when numeric, and fluctuation analysis.
-14. Write `final_report.md` summarizing README-only planning, environment, assets, commands, target result, comparison, failures, and remaining risks.
+11. Repair and retry failures in a loop before writing `failure_analysis.md`: if a package is too new, downgrade it; if a package is too old, upgrade it; if CUDA/PyTorch is incompatible, switch to a compatible PyTorch/CUDA build; if Python is wrong, rebuild the environment with the README Python version or the default `python=3.12`; if a download fails, record the exact URL/path/error and retry only documented mirrors or user-provided paths. Do not give up after the first failure; make at least one concrete repair and retry, and use up to three targeted repair attempts when the logs provide actionable evidence.
+12. Only after repeated targeted repair attempts still fail, write `failure_analysis.md` with exact command, category, evidence, attempted fixes, and remaining blocker. A blocked reproduction is a failed run and must not call `task_done`.
+13. Extract the reproduced result for the target prompt into `.trae_env/reproduced_metrics.json`. This file must contain actual reproduced metric/result values from execution output, not placeholders, blocked statuses, or planned values.
+14. Extract the original README result/value for the target prompt into `.trae_env/original_metrics.json` when README provides one.
+15. Write `results_comparison.md` for the target prompt with original result/value, reproduced result/value, absolute difference when numeric, relative difference/percentage change when numeric, and fluctuation analysis.
+16. Write `final_report.md` summarizing README-only planning, environment, assets, commands, target result, comparison, failures, and remaining risks.
 
 Output discipline:
 - Keep command output short. Redirect long installation/test output to files under `.trae_env/logs/`, then inspect only targeted excerpts with `tail`, `head`, or `grep`.
@@ -108,9 +114,13 @@ Output discipline:
 - Before calling `task_done`, ensure `bash run_reproduction.sh` has succeeded and `results_comparison.md` plus `.trae_env/reproduction_verification.json` exist. The framework will reject premature completion when reproduction verification has not been recorded.
 
 Environment-first repair policy:
+- Python version mismatches must be repaired by recreating the isolated environment with the README Python version. If README gives no version, use Python 3.12 before trying other versions.
 - For import errors, check whether the package is missing, renamed, too new, too old, or installed in the wrong environment.
 - For API/attribute errors from third-party libraries, compare installed versions with README-described versions or commands. If README gives no version, infer whether the dependency is likely too new, too old, missing, or incompatible from the error and installed version.
+- For dependency conflicts, explicitly try version adjustment before giving up: downgrade too-new packages, upgrade too-old packages, and record each attempted version in `.trae_env/repair_history.md`.
 - For PyTorch/CUDA errors, check Python version, torch version, CUDA runtime, GPU availability, and whether CPU fallback is acceptable for the task.
+- If README gives no PyTorch version and CUDA is required, first try the PyTorch 2.6 / CUDA 12.4 package set. If it fails, choose a version compatible with the detected CUDA/runtime and record the reason.
+- If README gives no Transformers version, first try Transformers 4.55.x. If APIs are incompatible, adjust up or down based on the error and record the reason.
 - For command failures, verify the README-documented command, paths, working directory, environment activation, and required assets before editing code. If an asset is missing, update `download_assets.sh`; if an import or package error occurs, update `setup.sh` first.
 - Record the evidence and chosen fix in `.trae_env/repair_history.md`.
 

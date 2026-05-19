@@ -8,7 +8,7 @@
 
 需要准备：
 
-- 已安装 Python 和 `uv`
+- 已安装 Python
 - 已安装本仓库依赖
 - 一个可访问的模型服务
 - 一个目标代码仓库
@@ -19,7 +19,9 @@
 
 ```bash
 cd /path/to/trae-agent
-uv sync --all-extras
+python -m venv venv
+source venv/bin/activate
+pip install -e .
 ```
 
 脚本会优先使用当前激活的虚拟环境：
@@ -35,7 +37,13 @@ $VIRTUAL_ENV/bin/trae-cli
 venv/bin/trae-cli
 ```
 
-否则会回退到：
+默认不会自动调用 `uv` 创建环境。如果你明确想让 `uv` 管理环境，可以使用：
+
+```bash
+USE_UV=1 ./scripts/run_repro.sh --working-dir ../target-repo --target "复现目标提示词"
+```
+
+这时才会回退到：
 
 ```bash
 uv run trae-cli
@@ -314,9 +322,13 @@ failure_analysis.md
 
 1. 先看日志和 `pip freeze`/`pip show`/`pipdeptree`，判断包是缺失、太新、太旧，还是版本冲突。
 2. 再看 README 中的安装命令、版本说明和当前 `pip freeze`/`python --version`/`torch`/`cuda` 信息，推断兼容版本。
-3. 优先修改 `setup.sh` 或环境文件，固定 Python、PyTorch/CUDA、pip 包、系统包版本。
-4. 再检查数据集和 checkpoint 路径是否正确。
-5. 不要一报错就修改仓库源码。只有确认是源码和文档运行时不兼容，且环境修复不可行时，才做最小源码修改，并在 `final_report.md` 里说明。
+3. 创建 conda 环境时必须指定 Python 版本；README 写明版本就使用 README 版本，没写时默认 `python=3.12`。
+4. README 没写 PyTorch 版本时，优先尝试 `torch==2.6.*`、`torchvision==0.21.*`、`torchaudio==2.6.*`，CUDA 环境优先按 CUDA 12.4 wheel 配置。
+5. README 没写 Transformers 版本时，优先尝试 `transformers==4.55.*`。
+6. 包太新就降级，包太旧就升级，CUDA/torch 不匹配就换匹配的 PyTorch/CUDA 组合。
+7. 每次修复都记录到 `.trae_env/repair_history.md`，并重新执行失败阶段；不能第一次失败就写 `failure_analysis.md`。
+8. 再检查数据集和 checkpoint 路径是否正确。
+9. 不要一报错就修改仓库源码。只有确认是源码和文档运行时不兼容，且环境修复不可行时，才做最小源码修改，并在 `final_report.md` 里说明。
 
 数据集和 checkpoint 规则：
 
@@ -332,9 +344,10 @@ agent 只有在以下条件满足后才允许结束：
 
 - `bash run_reproduction.sh` 成功。
 - `.trae_env/reproduction_verification.json` 存在且 returncode 为 0。
+- `.trae_env/reproduced_metrics.json` 包含真实执行得到的非空复现结果，不能是 `blocked`、`failed`、`not_run`、占位符或计划值。
 - `results_comparison.md` 已生成。
 
-如果模型提前调用 `task_done`，框架会拒绝，并要求继续运行复现或写失败分析。
+如果模型提前调用 `task_done`，或者只在文本里说“我要 task_done”但没有真实指标，框架会拒绝并把本次运行标记为失败，避免在无效完成状态里循环。
 
 ## 10. 安全边界
 
