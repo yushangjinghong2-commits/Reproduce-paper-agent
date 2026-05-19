@@ -14,12 +14,24 @@ import json
 import locale
 import os
 import re
+import signal
 from datetime import datetime
 from pathlib import Path
 from typing import override
 
 from trae_agent.tools.base import Tool, ToolCallArguments, ToolError, ToolExecResult, ToolParameter
 from trae_agent.tools.run import decode_bytes
+
+
+def _default_bash_timeout() -> float | None:
+    raw_timeout = os.environ.get("TRAE_BASH_TIMEOUT", "").strip()
+    if not raw_timeout:
+        return None
+    try:
+        timeout = float(raw_timeout)
+    except ValueError:
+        return None
+    return timeout if timeout > 0 else None
 
 
 class _BashSession:
@@ -30,7 +42,7 @@ class _BashSession:
 
     command: str = "/bin/bash"
     _output_delay: float = 0.2  # seconds
-    _timeout: float = 120.0  # seconds
+    _timeout: float | None = _default_bash_timeout()
     _sentinel: str = ",,,,bash-command-exit-__ERROR_CODE__-banner,,,,"  # `__ERROR_CODE__` will be replaced by `$?` or `!errorlevel!` later
 
     def __init__(self) -> None:
@@ -90,8 +102,9 @@ class _BashSession:
         except Exception:
             return None
 
-    async def run(self, command: str) -> ToolExecResult:
+    async def run(self, command: str, timeout: float | None = None) -> ToolExecResult:
         """Execute a command in the bash shell."""
+        timeout_value = timeout or self._timeout
         if not self._started or self._process is None:
             raise ToolError("Session has not started.")
         if self._process.returncode is not None:
@@ -100,9 +113,9 @@ class _BashSession:
                 error_code=-1,
             )
         if self._timed_out:
-            raise ToolError(
-                f"timed out: bash has not returned in {self._timeout} seconds and must be restarted",
-            )
+            if timeout_value is None:
+                raise ToolError("bash was previously interrupted and must be restarted")
+            raise ToolError(f"timed out: bash has not returned in {timeout_value} seconds")
 
         # we know these are not None because we created the process with PIPEs
         assert self._process.stdin
@@ -131,7 +144,7 @@ class _BashSession:
 
         # read output from the process, until the sentinel is found
         try:
-            async with asyncio.timeout(self._timeout):
+            async with asyncio.timeout(timeout_value):
                 while True:
                     await asyncio.sleep(self._output_delay)
                     # if we read directly from stdout/stderr, it will wait forever for
@@ -151,9 +164,7 @@ class _BashSession:
                         break
         except asyncio.TimeoutError:
             self._timed_out = True
-            raise ToolError(
-                f"timed out: bash has not returned in {self._timeout} seconds and must be restarted",
-            ) from None
+            raise ToolError(f"timed out: bash has not returned in {timeout_value} seconds") from None
 
         if output.endswith("\n"):  # pyright: ignore[reportUnknownMemberType]
             output = output[:-1]  # pyright: ignore[reportUnknownVariableType]
@@ -184,6 +195,8 @@ class BashTool(Tool):
         super().__init__(model_provider)
         self._session: _BashSession | None = None
         self._command_counter = 0
+        self._job_counter = 0
+        self._background_jobs: dict[str, dict[str, object]] = {}
 
     @override
     def get_model_provider(self) -> str | None:
@@ -201,7 +214,8 @@ class BashTool(Tool):
 * State is persistent across command calls and discussions with the user.
 * To inspect a particular line range of a file, e.g. lines 10-25, try 'sed -n 10,25p /path/to/the/file'.
 * Please avoid commands that may produce a very large amount of output.
-* Please run long lived commands in the background, e.g. 'sleep 10 &' or start a server in the background.
+* Long setup/download/evaluation commands can take a long time. Use run_in_background=true for those commands, then poll with job_id to show progress from the log tail until the job finishes.
+* To stop a background job after inspecting progress, call this tool with the same job_id and kill=true.
 """
 
     @override
@@ -223,10 +237,40 @@ class BashTool(Tool):
                 description="Set to true to restart the bash session.",
                 required=restart_required,
             ),
+            ToolParameter(
+                name="timeout",
+                type="integer",
+                description="Maximum seconds to wait for a foreground command. Omit for no fixed timeout; TRAE_BASH_TIMEOUT can set a default.",
+                required=False,
+            ),
+            ToolParameter(
+                name="run_in_background",
+                type="boolean",
+                description="Run a long command as a tracked background job and return immediately with a job_id.",
+                required=False,
+            ),
+            ToolParameter(
+                name="job_id",
+                type="string",
+                description="Poll a previously started background job. When this is set, command is ignored.",
+                required=False,
+            ),
+            ToolParameter(
+                name="kill",
+                type="boolean",
+                description="When job_id is set, terminate that background job instead of polling it.",
+                required=False,
+            ),
         ]
 
     @override
     async def execute(self, arguments: ToolCallArguments) -> ToolExecResult:
+        job_id = arguments.get("job_id")
+        if job_id:
+            if bool(arguments.get("kill")):
+                return await self._kill_background_job(str(job_id))
+            return await self._poll_background_job(str(job_id))
+
         if arguments.get("restart"):
             if self._session:
                 await self._session.stop()
@@ -253,8 +297,17 @@ class BashTool(Tool):
         if safety_error:
             return ToolExecResult(error=safety_error, error_code=-1)
 
+        if bool(arguments.get("run_in_background")) or self._should_auto_background(command):
+            try:
+                return await self._start_background_job(command)
+            except Exception as e:
+                return ToolExecResult(
+                    error=f"Error starting background bash command: {e}", error_code=-1
+                )
+
+        timeout = self._parse_timeout(arguments.get("timeout"))
         try:
-            result = await self._session.run(command)
+            result = await self._session.run(command, timeout=timeout)
             return self._record_and_truncate_result(command, result)
         except Exception as e:
             return ToolExecResult(error=f"Error running bash command: {e}", error_code=-1)
@@ -262,6 +315,20 @@ class BashTool(Tool):
     @override
     async def close(self):
         """Properly close self._process."""
+        for job in self._background_jobs.values():
+            process = job.get("process")
+            if isinstance(process, asyncio.subprocess.Process) and process.returncode is None:
+                if os.name != "nt" and process.pid is not None:
+                    os.killpg(process.pid, signal.SIGTERM)
+                else:
+                    process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    if os.name != "nt" and process.pid is not None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    else:
+                        process.kill()
         if self._session:
             ret = await self._session.stop()
             self._session = None
@@ -322,6 +389,201 @@ class BashTool(Tool):
         terminator = r"(?:\s|$)"
         pattern = segment_prefix + optional_runner + script + terminator
         return re.search(pattern, command) is not None
+
+    def _parse_timeout(self, value: object) -> float | None:
+        if value is None:
+            return None
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError):
+            return None
+        if timeout <= 0:
+            return None
+        return timeout
+
+    def _should_auto_background(self, command: str) -> bool:
+        long_command_patterns = [
+            r"(?:^|[;&]\s*|\|\|\s*|&&\s*)(?:(?:bash|sh)\s+)?(?:\./)?setup\.sh(?:\s|$)",
+            r"(?:^|[;&]\s*|\|\|\s*|&&\s*)(?:(?:bash|sh)\s+)?(?:\./)?download_assets\.sh(?:\s|$)",
+            r"(?:^|[;&]\s*|\|\|\s*|&&\s*)(?:(?:bash|sh)\s+)?(?:\./)?run_reproduction\.sh(?:\s|$)",
+            r"\bconda\s+(?:create|install|env\s+create)\b",
+            r"\bpip\s+install\b",
+            r"\bhuggingface-cli\s+download\b",
+            r"\bwget\b",
+            r"\bcurl\b.+(?:-O|-o)\b",
+        ]
+        return any(re.search(pattern, command) for pattern in long_command_patterns)
+
+    async def _start_background_job(self, command: str) -> ToolExecResult:
+        self._job_counter += 1
+        job_id = f"job_{self._job_counter:04d}"
+        env_dir = Path.cwd() / ".trae_env"
+        logs_dir = env_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        log_path = logs_dir / f"{job_id}.log"
+        header = (
+            f"timestamp: {datetime.now().isoformat()}\n"
+            f"job_id: {job_id}\n"
+            f"command: {command}\n\n"
+            "===== OUTPUT =====\n"
+        )
+        log_path.write_text(header, encoding="utf-8")
+
+        command_to_run = command
+        if os.name != "nt":
+            command_to_run = "set -o pipefail\n" + command
+
+        process = await asyncio.create_subprocess_shell(
+            command_to_run,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            start_new_session=(os.name != "nt"),
+        )
+        job: dict[str, object] = {
+            "command": command,
+            "log_path": log_path,
+            "process": process,
+            "pid": process.pid,
+            "started_at": datetime.now().isoformat(),
+            "recorded": False,
+        }
+        self._background_jobs[job_id] = job
+        job["capture_task"] = asyncio.create_task(
+            self._capture_background_output(job_id, process, log_path)
+        )
+        return ToolExecResult(
+            output=(
+                f"Started background job {job_id}.\n"
+                f"PID/process group: {process.pid}\n"
+                f"Log: {log_path}\n"
+                "Poll progress with the bash tool using this argument: "
+                f'{{"job_id": "{job_id}"}}\n'
+                "To stop it after inspecting progress, use: "
+                f'{{"job_id": "{job_id}", "kill": true}}'
+            )
+        )
+
+    async def _capture_background_output(
+        self, job_id: str, process: asyncio.subprocess.Process, log_path: Path
+    ) -> None:
+        try:
+            assert process.stdout is not None
+            with log_path.open("ab") as log_file:
+                while True:
+                    chunk = await process.stdout.read(4096)
+                    if not chunk:
+                        break
+                    log_file.write(chunk)
+                    log_file.flush()
+            returncode = await process.wait()
+        except Exception as e:
+            returncode = -1
+            with log_path.open("ab") as log_file:
+                log_file.write(f"\n[background capture error] {e}\n".encode())
+
+        job = self._background_jobs.get(job_id)
+        if job is not None:
+            job["returncode"] = returncode
+            job["finished_at"] = datetime.now().isoformat()
+
+    async def _poll_background_job(self, job_id: str) -> ToolExecResult:
+        job = self._background_jobs.get(job_id)
+        if job is None:
+            return ToolExecResult(error=f"Background job '{job_id}' not found.", error_code=-1)
+
+        process = job["process"]
+        if not isinstance(process, asyncio.subprocess.Process):
+            return ToolExecResult(error=f"Background job '{job_id}' has invalid state.", error_code=-1)
+
+        log_path = job["log_path"]
+        if not isinstance(log_path, Path):
+            return ToolExecResult(error=f"Background job '{job_id}' has invalid log path.", error_code=-1)
+
+        returncode = process.returncode
+        if returncode is None and "returncode" in job:
+            recorded_returncode = job["returncode"]
+            returncode = int(recorded_returncode) if isinstance(recorded_returncode, int) else None
+
+        tail = self._read_log_tail(log_path)
+        command = str(job.get("command", ""))
+        if returncode is None:
+            return ToolExecResult(
+                output=(
+                    f"Background job {job_id} is still running.\n"
+                    f"PID/process group: {job.get('pid')}\n"
+                    f"Log: {log_path}\n\n"
+                    f"===== LOG TAIL =====\n{tail}"
+                ),
+                error_code=0,
+            )
+
+        if not bool(job.get("recorded")):
+            result = ToolExecResult(output=tail, error_code=returncode)
+            self._append_command_record(command, result, log_path)
+            self._record_reproduction_verification(command, result, log_path)
+            job["recorded"] = True
+
+        return ToolExecResult(
+            output=(
+                f"Background job {job_id} finished with returncode {returncode}.\n"
+                f"Log: {log_path}\n\n"
+                f"===== LOG TAIL =====\n{tail}"
+            ),
+            error_code=returncode,
+        )
+
+    def _read_log_tail(self, log_path: Path, max_chars: int = 12000) -> str:
+        try:
+            data = log_path.read_bytes()
+        except OSError as e:
+            return f"[unable to read log: {e}]"
+        text = decode_bytes(data)
+        if len(text) <= max_chars:
+            return text
+        return text[-max_chars:]
+
+    async def _kill_background_job(self, job_id: str) -> ToolExecResult:
+        job = self._background_jobs.get(job_id)
+        if job is None:
+            return ToolExecResult(error=f"Background job '{job_id}' not found.", error_code=-1)
+
+        process = job.get("process")
+        if not isinstance(process, asyncio.subprocess.Process):
+            return ToolExecResult(error=f"Background job '{job_id}' has invalid state.", error_code=-1)
+
+        log_path = job.get("log_path")
+        if not isinstance(log_path, Path):
+            return ToolExecResult(error=f"Background job '{job_id}' has invalid log path.", error_code=-1)
+
+        if process.returncode is None:
+            try:
+                if os.name != "nt" and process.pid is not None:
+                    os.killpg(process.pid, signal.SIGTERM)
+                else:
+                    process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    if os.name != "nt" and process.pid is not None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    else:
+                        process.kill()
+            finally:
+                job["returncode"] = process.returncode if process.returncode is not None else -9
+                job["finished_at"] = datetime.now().isoformat()
+                with log_path.open("ab") as log_file:
+                    log_file.write(f"\n[killed by user request: {datetime.now().isoformat()}]\n".encode())
+
+        tail = self._read_log_tail(log_path)
+        return ToolExecResult(
+            output=(
+                f"Background job {job_id} was terminated by request.\n"
+                f"Log: {log_path}\n\n"
+                f"===== LOG TAIL =====\n{tail}"
+            ),
+            error_code=130,
+        )
 
     def _record_and_truncate_result(
         self, command: str, result: ToolExecResult

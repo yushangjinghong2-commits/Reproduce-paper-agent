@@ -358,5 +358,10 @@ agent 只有在以下条件满足后才允许结束：
 - 禁止 `sudo rm -rf`。
 - 禁止破坏性 `git clean -fd`。
 - 长输出会写入日志并截断返回，避免上下文爆炸。
+- `setup.sh`、`download_assets.sh`、`run_reproduction.sh`、`pip install`、`conda create/install`、`wget/curl`、`huggingface-cli download` 等长命令会自动作为后台 job 运行，立即返回 `job_id`。
+- 后台 job 没有固定时间上限；agent 应继续用 bash 工具传入 `job_id` 轮询进度，直到日志显示 job 结束。
+- 轮询会刷新显示 `.trae_env/logs/job_xxxx.log` 的尾部内容，用于观察安装、下载、推理或评测进度。
+- 如果人判断任务卡住或方向错误，可以用同一个 `job_id` 加 `kill=true` 终止该后台任务。
+- 前台命令默认不设置固定超时；如果确实需要限制，可用环境变量 `TRAE_BASH_TIMEOUT` 或 bash 工具参数 `timeout` 设置。
 
 本课题要求不使用 Docker；如果原仓库 README 只提供 Docker 路线，agent 应将其转写为 conda/venv/pip/shell 脚本方案，并在报告中说明等价关系。
