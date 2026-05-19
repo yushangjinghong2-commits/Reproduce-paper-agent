@@ -610,13 +610,16 @@ class BashTool(Tool):
         if os.name != "nt":
             command_to_run = "set -o pipefail\n" + command
 
-        process = await asyncio.create_subprocess_shell(
-            command_to_run,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
-            start_new_session=(os.name != "nt"),
-        )
+        subprocess_kwargs: dict[str, object] = {
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.STDOUT,
+            "env": {**os.environ, "PYTHONUNBUFFERED": "1"},
+        }
+        if os.name != "nt":
+            subprocess_kwargs["executable"] = "/bin/bash"
+            subprocess_kwargs["start_new_session"] = True
+
+        process = await asyncio.create_subprocess_shell(command_to_run, **subprocess_kwargs)
         job: dict[str, object] = {
             "command": command,
             "log_path": log_path,
